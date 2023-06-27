@@ -340,7 +340,6 @@ def train(rank, world_size, args, g, data):
             print(f'Training loss: {loss/train_indices.num_batches:.4f}')
 
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_path',
