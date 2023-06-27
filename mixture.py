@@ -263,13 +263,10 @@ def _train(loader, model, opt, **kwargs):
     return total_loss
 
 
-def _train_cpu(loader, model, opt, load_core, comp_core, **kwargs):
-    with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
-        with loader.enable_cpu_affinity(loader_cores=load_core, compute_cores=comp_core):
-            total_loss = _train(loader, model, opt, **kwargs)
-    if kwargs['epoch'] == 0:
-        prof.export_chrome_trace('product_three_layer.json')
-    return total_loss
+def _train_cpu(load_core, comp_core, **kwargs):
+    with kwargs['loader'].enable_cpu_affinity(loader_cores=load_core, compute_cores=comp_core):
+        loss = _train(**kwargs)
+    return loss
 
 
 def train(rank, world_size, args, g, data):
@@ -325,14 +322,23 @@ def train(rank, world_size, args, g, data):
         'batch_size': args.batch_size,
     }
     for epoch in range(2):
-        model.train()
         params['epoch'] = epoch
-        if is_cpu_proc(args.cpu_process):
-            if params.get('load_core', None) is None or params.get('comp_core', None):
-                params['load_core'], params['comp_core'] = assign_cores(args.cpu_process)
-            loss = _train_cpu(**params)
-        else:
-            loss = _train(**params)
+        model.train()
+        with profile(
+                activities=[
+                    ProfilerActivity.CPU,
+                    ProfilerActivity.CUDA
+                ],
+                record_shapes=True
+        ) as prof:
+            if is_cpu_proc(args.cpu_process):
+                if params.get('load_core', None) is None or params.get('comp_core', None):
+                    params['load_core'], params['comp_core'] = assign_cores(args.cpu_process)
+                loss = _train_cpu(**params)
+            else:
+                loss = _train(**params)
+        if epoch == 1 and rank == args.cpu_process:
+            prof.export_chrome_trace('mixture_product.json')
         dist.barrier()
 
         # TODO: val or test
