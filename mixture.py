@@ -1,6 +1,7 @@
 import argparse
 import math
 import os
+from contextlib import nullcontext
 
 import dgl
 import dgl.nn as dglnn
@@ -206,11 +207,11 @@ def assign_cores(num_cpu_proc):
         comp_core = list(range(4, n))
     elif num_cpu_proc == 2:
         if rank == 0:
-            load_core = list(range(0, 8))
-            comp_core = list(range(8, n // 2))
+            load_core = list(range(0, 4))
+            comp_core = list(range(4, n // 2))
         else:
-            load_core = list(range(n // 2, n // 2 + 8))
-            comp_core = list(range(n // 2 + 8, n))
+            load_core = list(range(n // 2, n // 2 + 4))
+            comp_core = list(range(n // 2 + 4, n))
     elif num_cpu_proc == 4:
         if rank == 0:
             load_core = list(range(0, 4))
@@ -274,6 +275,8 @@ def train(rank, world_size, args, g, data):
     dist.init_process_group('gloo', rank=rank, world_size=world_size)
     device = torch.device("cpu" if is_cpu_proc(args.cpu_process)
                           else "cuda:{}".format(device_mapping(args.cpu_process)))
+    if not is_cpu_proc(args.cpu_process):
+        torch.cuda.set_device(device)
 
     # create GraphSAGE model
     in_size = g.ndata["feat"].shape[1]
@@ -330,27 +333,32 @@ def train(rank, world_size, args, g, data):
                     ProfilerActivity.CUDA
                 ],
                 record_shapes=True
-        ) as prof:
+        ) if True else nullcontext() as prof:
+            tik = time.time()
             if is_cpu_proc(args.cpu_process):
                 if params.get('load_core', None) is None or params.get('comp_core', None):
                     params['load_core'], params['comp_core'] = assign_cores(args.cpu_process)
                 loss = _train_cpu(**params)
             else:
                 loss = _train(**params)
+            if rank == 0: print(f'Epoch Time: {time.time() - tik:.4f}')
         if epoch == 1 and rank == args.cpu_process:
             prof.export_chrome_trace('mixture_product.json')
+
         dist.barrier()
 
         # TODO: val or test
         if rank == 0:
             print(f'Training loss: {loss/train_indices.num_batches:.4f}')
 
+    dist.destroy_process_group()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_path',
                         type=str,
-                        default='/data/gangda/dgl')
+                        default='/home/jason/DDP_GNN/dataset/')
     parser.add_argument("--cpu_process",
                         type=int,
                         default=1,
@@ -367,21 +375,28 @@ if __name__ == "__main__":
                         default=4096)
     arguments = parser.parse_args()
 
-    # set num processes
-    comp_proc_size = arguments.cpu_process + arguments.gpu_process
-    assert comp_proc_size > 0
-    if arguments.cpu_process == 0:
+    # Assure Consistency
+    if arguments.cpu_gpu_ratio == 0 or arguments.cpu_process == 0:
         arguments.cpu_gpu_ratio = 0
-    if arguments.gpu_process == 0:
+        arguments.cpu_process = 0
+    if arguments.cpu_gpu_ratio == 1 or arguments.gpu_process == 0:
         arguments.cpu_gpu_ratio = 1
+        arguments.gpu_process = 0
+    nprocs = arguments.cpu_process + arguments.gpu_process
+    assert nprocs > 0
+
     print(f'Use {arguments.cpu_process} CPU Comp processes and {arguments.gpu_process} GPUs\n'
           f'The batch size is {arguments.batch_size} with {arguments.cpu_gpu_ratio} cpu/gpu workload ratio')
 
     # load and preprocess dataset
     dataset = AsNodePredDataset(DglNodePropPredDataset("ogbn-products", arguments.data_path))
     g = dataset[0]
-    # avoid creating certain graph formats in each sub-process to save memory
-    g.create_formats_()
+    """
+    Note 1: This func avoid creating certain graph formats in each sub-process to save memory
+    Note 2: This func will init CUDA. It is not possible to use CUDA in a child process 
+            created by fork(), if CUDA has been initialized in the parent process. 
+    """
+    # g.create_formats_()
     data = (
         dataset.num_classes,
         dataset.train_idx,
@@ -392,11 +407,12 @@ if __name__ == "__main__":
 
     # multi-processes training
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
+    os.environ['MASTER_PORT'] = '29501'
+    # mp.set_start_method('spawn')
     mp.set_start_method('fork')
     processes = []
-    for i in range(comp_proc_size):
-        p = dmp.Process(target=train, args=(i, comp_proc_size, arguments, g, data))
+    for i in range(nprocs):
+        p = dmp.Process(target=train, args=(i, nprocs, arguments, g, data))
         p.start()
         processes.append(p)
     for p in processes:
