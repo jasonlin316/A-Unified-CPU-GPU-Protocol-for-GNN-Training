@@ -2,6 +2,7 @@
 
 Install TCMalloc:  https://google.github.io/tcmalloc/quickstart.html  
 Note: need to install Bazel first (also mentioned in the link above).   
+Note 2: Alternative approach to install TCMalloc: https://github.com/AUTOMATIC1111/stable-diffusion-webui/issues/10117
 
 After installation, preload tcmalloc first when running your code. For example:   
 ``` LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4.5.3 python training.py```
