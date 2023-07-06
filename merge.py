@@ -20,11 +20,19 @@ def merge_trace_files(input_files, output_file):
     # Write the merged trace to the output file
     with open(output_file, 'w') as f:
         json.dump(merged_data, f)
-# List of input trace files to merge
-input_files = ["product_three_layer_0.json", "product_three_layer_1.json", "product_three_layer_2.json", "product_three_layer_3.json"]
 
-# Output file to store the merged trace
-output_file = "combine.json"
 
-# Call the merge_trace_files function
-merge_trace_files(input_files, output_file)
+if __name__ == '__main__':
+    # List of input trace files to merge
+    input_files = [
+        "product_three_layer_0.json",
+        "product_three_layer_1.json",
+        "product_three_layer_2.json",
+        "product_three_layer_3.json"
+    ]
+
+    # Output file to store the merged trace
+    output_file = "trace/combine.json"
+
+    # Call the merge_trace_files function
+    merge_trace_files(input_files, output_file)
