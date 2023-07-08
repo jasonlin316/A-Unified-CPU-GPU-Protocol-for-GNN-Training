@@ -41,9 +41,13 @@ class SAGE(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList()
         # three-layer GraphSAGE-mean
-        self.layers.append(dglnn.SAGEConv(in_size, hid_size, "mean"))
-        self.layers.append(dglnn.SAGEConv(hid_size, hid_size, "mean"))
-        self.layers.append(dglnn.SAGEConv(hid_size, out_size, "mean"))
+        # self.layers.append(dglnn.SAGEConv(in_size, hid_size, "mean"))
+        # self.layers.append(dglnn.SAGEConv(hid_size, hid_size, "mean"))
+        # self.layers.append(dglnn.SAGEConv(hid_size, out_size, "mean"))
+        # three-layer GCN
+        self.layers.append(dglnn.GraphConv(in_size, hid_size, norm='both', weight=True, bias=True))
+        self.layers.append(dglnn.GraphConv(hid_size, hid_size, norm='both', weight=True, bias=True))
+        self.layers.append(dglnn.GraphConv(hid_size, out_size, norm='both', weight=True, bias=True))
         self.dropout = nn.Dropout(0.5)
         self.hid_size = hid_size
         self.out_size = out_size
@@ -151,8 +155,8 @@ def assign_cores(num_cpu_proc):
     load_core, comp_core = [], []
     n = psutil.cpu_count(logical=False)
     if num_cpu_proc == 1:
-        load_core = list(range(0, 8))
-        comp_core = list(range(8, n))
+        comp_core = list(range(0, 64))
+        load_core = list(range(64, 64+8))
     elif num_cpu_proc == 2:
         if rank == 0:
             load_core = list(range(0, 4))
@@ -195,18 +199,30 @@ def _train(loader, model, opt, **kwargs):
         pbar = tqdm(total=kwargs['train_size'])
         epoch = kwargs['epoch']
         pbar.set_description(f'Epoch {epoch:02d}')
+
+    process = kwargs['process']
+    device = torch.device("cpu" if is_cpu_proc(process)
+                          else "cuda:{}".format(device_mapping(process)))
+    
     for it, (input_nodes, output_nodes, blocks) in enumerate(loader):
-        if hasattr(blocks, '__len__'):
-            x = blocks[0].srcdata["feat"]
-            y = blocks[-1].dstdata["label"]
+        # if hasattr(blocks, '__len__'):
+        # if it+1 == 50: break
+        # x = blocks[0].srcdata["feat"]
+        # y = blocks[-1].dstdata["label"]
+        
+        # loss = F.cross_entropy(y_hat, y)
+        # else:
+        x = blocks.srcdata["feat"]
+        y = blocks.dstdata["label"]
+        y_hat = model(blocks, x)
+        if kwargs['device'] == "cpu": # for papers100M
+            y = y.type(torch.LongTensor)
             y_hat = model(blocks, x)
-            loss = F.cross_entropy(y_hat, y)
         else:
-            x = blocks.srcdata["feat"]
-            y = blocks.dstdata["label"]
-            y_hat = model(blocks, x)
-            loss = F.cross_entropy(y_hat[:output_nodes.shape[0]],
-                                   y[:output_nodes.shape[0]])
+            y = y.type(torch.LongTensor).to(device) 
+            y_hat = model(blocks, x).to(device)
+        loss = F.cross_entropy(y_hat[:output_nodes.shape[0]],
+                                y[:output_nodes.shape[0]])
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -228,23 +244,28 @@ def _train_cpu(load_core, comp_core, **kwargs):
 def train(rank, world_size, args, g, data):
     num_classes, train_idx, val_idx, test_idx = data
     dist.init_process_group('gloo', rank=rank, world_size=world_size)
+    
     device = torch.device("cpu" if is_cpu_proc(args.cpu_process)
                           else "cuda:{}".format(device_mapping(args.cpu_process)))
+    
     if not is_cpu_proc(args.cpu_process):
         torch.cuda.set_device(device)
 
+    print(device)
     # create GraphSAGE model
     in_size = g.ndata["feat"].shape[1]
     model = SAGE(in_size, 128, num_classes).to(device)
     model = DistributedDataParallel(model)
+    
+    g = dgl.add_self_loop(g) # for GCN model
 
     # create loader
     drop_last, shuffle = True, True
     sub_batch_sizes = [get_subbatch_size(args, r) for r in range(world_size)]
     if rank == 0: print('SubBatch sizes:', sub_batch_sizes)
     train_indices = UnevenDDPTensorizedDataset(
-        # train_idx.to(device),
-        test_idx.to(device),
+        train_idx.to(device),
+        # test_idx.to(device),
         args.batch_size,
         sub_batch_sizes,
         drop_last,
@@ -283,14 +304,15 @@ def train(rank, world_size, args, g, data):
         'rank': rank,
         'train_size': len(train_indices),
         'batch_size': args.batch_size,
+        'device':device,
+        'process': args.cpu_process
     }
-    for epoch in range(2):
+    for epoch in range(1):
         params['epoch'] = epoch
         model.train()
         with profile(
                 activities=[
-                    ProfilerActivity.CPU,
-                    ProfilerActivity.CUDA
+                    ProfilerActivity.CPU
                 ],
                 record_shapes=True
         ) if True else nullcontext() as prof:
@@ -302,7 +324,7 @@ def train(rank, world_size, args, g, data):
             else:
                 loss = _train(**params)
             if rank == 0: print(f'Epoch Time: {time.time() - tik:.4f}')
-        if epoch == 1:
+        if epoch == 0:
             prof.export_chrome_trace(TRACE_NAME.format(rank))
 
         dist.barrier()
@@ -334,7 +356,7 @@ def train_single_gpu(rank, world_size, args, g, data):
         [10, 5],
         # prefetch_node_feats=["feat"],
     )
-    train_idx = test_idx
+    # train_idx = test_idx
     train_dataloader = DataLoader(
         g,
         train_idx.to(device),
@@ -391,14 +413,17 @@ if __name__ == "__main__":
                         choices=[0, 1, 2, 4])
     parser.add_argument("--gpu_process",
                         type=int,
-                        default=1,
-                        choices=[0, 1])
+                        default=1)
     parser.add_argument("--cpu_gpu_ratio",
                         type=float,
                         default=0.3)
     parser.add_argument("--batch_size",
                         type=int,
-                        default=8192)
+                        default=1024*5)
+    parser.add_argument('--dataset',
+                        type=str,
+                        default='ogbn-products',
+                        choices=["ogbn-papers100M","ogbn-products"])
     arguments = parser.parse_args()
 
     # Assure Consistency
@@ -415,7 +440,7 @@ if __name__ == "__main__":
           f'The batch size is {arguments.batch_size} with {arguments.cpu_gpu_ratio} cpu/gpu workload ratio')
 
     # load and preprocess dataset
-    dataset = AsNodePredDataset(DglNodePropPredDataset("ogbn-products", arguments.data_path))
+    dataset = AsNodePredDataset(DglNodePropPredDataset(arguments.dataset, arguments.data_path))
     g = dataset[0]
     """
     Note 1: This func avoid creating certain graph formats in each sub-process to save memory
@@ -445,9 +470,9 @@ if __name__ == "__main__":
     for p in processes:
         p.join()
 
-    input_files = [TRACE_NAME.format(i) for i in range(nprocs)]
-    merge_trace_files(input_files, OUTPUT_TRACE_NAME)
-    for i in range(nprocs):
-        os.remove(TRACE_NAME.format(i))
+    # input_files = [TRACE_NAME.format(i) for i in range(nprocs)]
+    # merge_trace_files(input_files, OUTPUT_TRACE_NAME)
+    # for i in range(nprocs):
+    #     os.remove(TRACE_NAME.format(i))
 
     print("Program finished")
