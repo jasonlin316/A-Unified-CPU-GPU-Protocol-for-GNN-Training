@@ -21,6 +21,7 @@ from dgl.dataloading import (
     NeighborSampler, ShaDowKHopSampler,
 )
 from ogb.nodeproppred import DglNodePropPredDataset
+from ogb.lsc import MAG240MDataset, MAG240MEvaluator
 from torch.profiler import profile, record_function, ProfilerActivity
 from torchmetrics.classification import MulticlassAccuracy
 import time
@@ -30,6 +31,7 @@ import dgl.multiprocessing as dmp
 from torch.nn.parallel import DistributedDataParallel
 import psutil
 
+from load_mag_to_shm import fetch_datas_from_shm
 from merge import merge_trace_files
 
 TRACE_NAME = 'mixture_product_{}.json'
@@ -41,13 +43,15 @@ class SAGE(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList()
         # three-layer GraphSAGE-mean
-        # self.layers.append(dglnn.SAGEConv(in_size, hid_size, "mean"))
-        # self.layers.append(dglnn.SAGEConv(hid_size, hid_size, "mean"))
-        # self.layers.append(dglnn.SAGEConv(hid_size, out_size, "mean"))
+        self.layers.append(dglnn.SAGEConv(in_size, hid_size, "mean"))
+        self.layers.append(dglnn.SAGEConv(hid_size, hid_size, "mean"))
+        self.layers.append(dglnn.SAGEConv(hid_size, hid_size, "mean"))
+        self.layers.append(dglnn.SAGEConv(hid_size, hid_size, "mean"))
+        self.layers.append(dglnn.SAGEConv(hid_size, out_size, "mean"))
         # three-layer GCN
-        self.layers.append(dglnn.GraphConv(in_size, hid_size, norm='both', weight=True, bias=True))
-        self.layers.append(dglnn.GraphConv(hid_size, hid_size, norm='both', weight=True, bias=True))
-        self.layers.append(dglnn.GraphConv(hid_size, out_size, norm='both', weight=True, bias=True))
+        # self.layers.append(dglnn.GraphConv(in_size, hid_size, norm='both', weight=True, bias=True))
+        # self.layers.append(dglnn.GraphConv(hid_size, hid_size, norm='both', weight=True, bias=True))
+        # self.layers.append(dglnn.GraphConv(hid_size, out_size, norm='both', weight=True, bias=True))
         self.dropout = nn.Dropout(0.5)
         self.hid_size = hid_size
         self.out_size = out_size
@@ -155,8 +159,10 @@ def assign_cores(num_cpu_proc):
     load_core, comp_core = [], []
     n = psutil.cpu_count(logical=False)
     if num_cpu_proc == 1:
-        comp_core = list(range(0, 64))
-        load_core = list(range(64, 64+8))
+        # comp_core = list(range(0, 64))
+        # load_core = list(range(64, 64+8))
+        load_core = list(range(0, 8))
+        comp_core = list(range(8, n))
     elif num_cpu_proc == 2:
         if rank == 0:
             load_core = list(range(0, 4))
@@ -203,30 +209,31 @@ def _train(loader, model, opt, **kwargs):
     process = kwargs['process']
     device = torch.device("cpu" if is_cpu_proc(process)
                           else "cuda:{}".format(device_mapping(process)))
-    
     for it, (input_nodes, output_nodes, blocks) in enumerate(loader):
-        # if hasattr(blocks, '__len__'):
-        # if it+1 == 50: break
-        # x = blocks[0].srcdata["feat"]
-        # y = blocks[-1].dstdata["label"]
-        
-        # loss = F.cross_entropy(y_hat, y)
-        # else:
-        x = blocks.srcdata["feat"]
-        y = blocks.dstdata["label"]
-        y_hat = model(blocks, x)
-        if kwargs['device'] == "cpu": # for papers100M
+        # if it + 1 == 50: break
+        if hasattr(blocks, '__len__'):
+            x = blocks[0].srcdata["feat"].to(torch.float32)
+            y = blocks[-1].dstdata["label"]
+        else:
+            x = blocks.srcdata["feat"].to(torch.float32)
+            y = blocks.dstdata["label"]
+        # y_hat = model(blocks, x)
+        if kwargs['device'] == "cpu":  # for papers100M
             y = y.type(torch.LongTensor)
             y_hat = model(blocks, x)
         else:
-            y = y.type(torch.LongTensor).to(device) 
+            y = y.type(torch.LongTensor).to(device)
             y_hat = model(blocks, x).to(device)
         loss = F.cross_entropy(y_hat[:output_nodes.shape[0]],
-                                y[:output_nodes.shape[0]])
+                               y[:output_nodes.shape[0]])
         opt.zero_grad()
         loss.backward()
         opt.step()
-        total_loss += loss
+
+        del input_nodes, output_nodes, blocks
+        torch.cuda.empty_cache()
+
+        total_loss += loss.item()  # avoid cuda memory accumulation
         if kwargs['rank'] == 0:
             pbar.update(kwargs['batch_size'])
             # pbar.update(output_nodes.shape[0])
@@ -242,22 +249,23 @@ def _train_cpu(load_core, comp_core, **kwargs):
 
 
 def train(rank, world_size, args, g, data):
-    num_classes, train_idx, val_idx, test_idx = data
+    num_classes, train_idx = data
     dist.init_process_group('gloo', rank=rank, world_size=world_size)
-    
+
     device = torch.device("cpu" if is_cpu_proc(args.cpu_process)
                           else "cuda:{}".format(device_mapping(args.cpu_process)))
-    
+
     if not is_cpu_proc(args.cpu_process):
         torch.cuda.set_device(device)
 
-    print(device)
     # create GraphSAGE model
     in_size = g.ndata["feat"].shape[1]
+    print(1)
     model = SAGE(in_size, 128, num_classes).to(device)
+    print(2)
     model = DistributedDataParallel(model)
-    
-    g = dgl.add_self_loop(g) # for GCN model
+
+    # g = dgl.add_self_loop(g)  # for GCN model
 
     # create loader
     drop_last, shuffle = True, True
@@ -271,15 +279,20 @@ def train(rank, world_size, args, g, data):
         drop_last,
         shuffle
     )
-    # sampler = NeighborSampler(
-    #     [15, 10, 5],
-    #     prefetch_node_feats=["feat"],
-    #     prefetch_labels=["label"],
-    # )
-    sampler = ShaDowKHopSampler(
-        [10, 5],
-        prefetch_node_feats=["feat"],
-    )
+    if args.sampler.lower() == 'neighbor':
+        sampler = NeighborSampler(
+            [15, 10, 5],
+            prefetch_node_feats=["feat"],
+            prefetch_labels=["label"],
+        )
+    elif args.sampler.lower() == 'shadow':
+        sampler = ShaDowKHopSampler(
+            [10, 5],
+            output_device=device,
+            prefetch_node_feats=["feat"],
+        )
+    else:
+        raise NotImplementedError
     train_dataloader = DataLoader(
         g,
         train_indices,  # train_idx.to(device)
@@ -290,7 +303,7 @@ def train(rank, world_size, args, g, data):
         use_uva=not is_cpu_proc(args.cpu_process),
         drop_last=drop_last,
         shuffle=shuffle,
-        num_workers=8 if is_cpu_proc(args.cpu_process) else 0,
+        num_workers=int(8/args.cpu_process) if is_cpu_proc(args.cpu_process) else 0,
     )
 
     # training loop
@@ -304,10 +317,10 @@ def train(rank, world_size, args, g, data):
         'rank': rank,
         'train_size': len(train_indices),
         'batch_size': args.batch_size,
-        'device':device,
+        'device': device,
         'process': args.cpu_process
     }
-    for epoch in range(1):
+    for epoch in range(2):
         params['epoch'] = epoch
         model.train()
         with profile(
@@ -315,7 +328,7 @@ def train(rank, world_size, args, g, data):
                     ProfilerActivity.CPU
                 ],
                 record_shapes=True
-        ) if True else nullcontext() as prof:
+        ) if False else nullcontext() as prof:
             tik = time.time()
             if is_cpu_proc(args.cpu_process):
                 if params.get('load_core', None) is None or params.get('comp_core', None):
@@ -324,8 +337,8 @@ def train(rank, world_size, args, g, data):
             else:
                 loss = _train(**params)
             if rank == 0: print(f'Epoch Time: {time.time() - tik:.4f}')
-        if epoch == 0:
-            prof.export_chrome_trace(TRACE_NAME.format(rank))
+        # if epoch == 0:
+        #     prof.export_chrome_trace(TRACE_NAME.format(rank))
 
         dist.barrier()
 
@@ -334,72 +347,6 @@ def train(rank, world_size, args, g, data):
             print(f'Training loss: {loss / train_indices.num_batches:.4f}')
 
     dist.destroy_process_group()
-
-
-def train_single_gpu(rank, world_size, args, g, data):
-    # delete all unnecessary ddp wrappers
-    num_classes, train_idx, val_idx, test_idx = data
-    device = torch.device("cuda:0")
-    torch.cuda.set_device(device)
-
-    # create GraphSAGE model
-    in_size = g.ndata["feat"].shape[1]
-    model = SAGE(in_size, 128, num_classes).to(device)
-
-    # create loader
-    # sampler = NeighborSampler(
-    #     [15, 10, 5],
-    #     prefetch_node_feats=["feat"],
-    #     prefetch_labels=["label"],
-    # )
-    sampler = ShaDowKHopSampler(
-        [10, 5],
-        # prefetch_node_feats=["feat"],
-    )
-    # train_idx = test_idx
-    train_dataloader = DataLoader(
-        g,
-        train_idx.to(device),
-        sampler,
-        device=device,
-        batch_size=args.batch_size,
-        use_uva=True,
-        drop_last=True,
-        shuffle=True,
-        num_workers=0,
-    )
-
-    # training loop
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=5e-4)
-    params = {
-        # training
-        'loader': train_dataloader,
-        'model': model,
-        'opt': opt,
-        # logging
-        'rank': rank,
-        'train_size': len(train_idx),
-        'batch_size': args.batch_size,
-    }
-    for epoch in range(2):
-        params['epoch'] = epoch
-        model.train()
-        with profile(
-                activities=[
-                    ProfilerActivity.CPU,
-                    ProfilerActivity.CUDA
-                ],
-                record_shapes=True
-        ) if True else nullcontext() as prof:
-            tik = time.time()
-            loss = _train(**params)
-            if rank == 0: print(f'Epoch Time: {time.time() - tik:.4f}')
-        if epoch == 1:
-            prof.export_chrome_trace(TRACE_NAME.format(rank))
-
-        # TODO: val or test
-        if rank == 0:
-            print(f'Training loss: {loss / len(train_idx):.4f}')
 
 
 if __name__ == "__main__":
@@ -416,14 +363,18 @@ if __name__ == "__main__":
                         default=1)
     parser.add_argument("--cpu_gpu_ratio",
                         type=float,
-                        default=0.3)
+                        default=0.5)
     parser.add_argument("--batch_size",
                         type=int,
-                        default=1024*5)
+                        default=1024 * 5)
     parser.add_argument('--dataset',
                         type=str,
                         default='ogbn-products',
-                        choices=["ogbn-papers100M","ogbn-products"])
+                        choices=["ogbn-papers100M", "ogbn-products", "mag240M"])
+    parser.add_argument('--sampler',
+                        type=str,
+                        default='shadow',
+                        choices=["neighbor", "shadow"])
     arguments = parser.parse_args()
 
     # Assure Consistency
@@ -440,19 +391,29 @@ if __name__ == "__main__":
           f'The batch size is {arguments.batch_size} with {arguments.cpu_gpu_ratio} cpu/gpu workload ratio')
 
     # load and preprocess dataset
-    dataset = AsNodePredDataset(DglNodePropPredDataset(arguments.dataset, arguments.data_path))
-    g = dataset[0]
+    if arguments.dataset == 'mag240M':
+        dataset = MAG240MDataset(root='../HiPC')
+        (g,), _ = dgl.load_graphs('../HiPC/graph.dgl')
+        g = g.formats(["csc"])
+        paper_offset = dataset.num_authors + dataset.num_institutions
+        dataset.train_idx = torch.from_numpy(dataset.get_idx_split("train")) + paper_offset
+        g.ndata["feat"] = fetch_datas_from_shm()
+        g.ndata["label"] = torch.cat([torch.empty((paper_offset,), dtype=torch.long),
+                                      torch.LongTensor(dataset.paper_label[:])])
+    else:
+        dataset = AsNodePredDataset(DglNodePropPredDataset(arguments.dataset, arguments.data_path))
+        g = dataset[0]
+
     """
     Note 1: This func avoid creating certain graph formats in each sub-process to save memory
     Note 2: This func will init CUDA. It is not possible to use CUDA in a child process 
             created by fork(), if CUDA has been initialized in the parent process. 
     """
     # g.create_formats_()
+
     data = (
         dataset.num_classes,
         dataset.train_idx,
-        dataset.val_idx,
-        dataset.test_idx,
     )
     print("Data loading finished")
 
@@ -464,7 +425,6 @@ if __name__ == "__main__":
     processes = []
     for i in range(nprocs):
         p = dmp.Process(target=train, args=(i, nprocs, arguments, g, data))
-        # p = dmp.Process(target=train_single_gpu, args=(i, nprocs, arguments, g, data))
         p.start()
         processes.append(p)
     for p in processes:
