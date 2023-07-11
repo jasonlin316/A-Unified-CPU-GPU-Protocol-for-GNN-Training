@@ -38,20 +38,27 @@ TRACE_NAME = 'mixture_product_{}.json'
 OUTPUT_TRACE_NAME = "combine.json"
 
 
-class SAGE(nn.Module):
-    def __init__(self, in_size, hid_size, out_size):
+class GNN(nn.Module):
+    def __init__(self, in_size, hid_size, out_size, num_layers=3, model_name='sage'):
         super().__init__()
         self.layers = nn.ModuleList()
-        # three-layer GraphSAGE-mean
-        self.layers.append(dglnn.SAGEConv(in_size, hid_size, "mean"))
-        self.layers.append(dglnn.SAGEConv(hid_size, hid_size, "mean"))
-        self.layers.append(dglnn.SAGEConv(hid_size, hid_size, "mean"))
-        self.layers.append(dglnn.SAGEConv(hid_size, hid_size, "mean"))
-        self.layers.append(dglnn.SAGEConv(hid_size, out_size, "mean"))
-        # three-layer GCN
-        # self.layers.append(dglnn.GraphConv(in_size, hid_size, norm='both', weight=True, bias=True))
-        # self.layers.append(dglnn.GraphConv(hid_size, hid_size, norm='both', weight=True, bias=True))
-        # self.layers.append(dglnn.GraphConv(hid_size, out_size, norm='both', weight=True, bias=True))
+
+        # GraphSAGE-mean
+        if model_name.lower() == 'sage':
+            self.layers.append(dglnn.SAGEConv(in_size, hid_size, "mean"))
+            for i in range(num_layers-2):
+                self.layers.append(dglnn.SAGEConv(hid_size, hid_size, "mean"))
+            self.layers.append(dglnn.SAGEConv(hid_size, out_size, "mean"))
+        # GCN
+        elif model_name.lower() == 'gcn':
+            kwargs = {'norm': 'both', 'weight': True, 'bias': True, 'allow_zero_in_degree': True}
+            self.layers.append(dglnn.GraphConv(in_size, hid_size, **kwargs))
+            for i in range(num_layers - 2):
+                self.layers.append(dglnn.GraphConv(hid_size, hid_size, **kwargs))
+            self.layers.append(dglnn.GraphConv(hid_size, out_size, **kwargs))
+        else:
+            raise NotImplementedError
+
         self.dropout = nn.Dropout(0.5)
         self.hid_size = hid_size
         self.out_size = out_size
@@ -260,12 +267,11 @@ def train(rank, world_size, args, g, data):
 
     # create GraphSAGE model
     in_size = g.ndata["feat"].shape[1]
-    print(1)
-    model = SAGE(in_size, 128, num_classes).to(device)
-    print(2)
+    model = GNN(in_size, 128, num_classes,
+                num_layers=args.layer, model_name=args.model).to(device)
     model = DistributedDataParallel(model)
 
-    # g = dgl.add_self_loop(g)  # for GCN model
+    # g = dgl.add_self_loop(g)  # for GCN model, not work for Mag
 
     # create loader
     drop_last, shuffle = True, True
@@ -285,6 +291,7 @@ def train(rank, world_size, args, g, data):
             prefetch_node_feats=["feat"],
             prefetch_labels=["label"],
         )
+        assert len(sampler.fanouts) == args.layer
     elif args.sampler.lower() == 'shadow':
         sampler = ShaDowKHopSampler(
             [10, 5],
@@ -354,6 +361,10 @@ if __name__ == "__main__":
     parser.add_argument('--data_path',
                         type=str,
                         default='/home/jason/DDP_GNN/dataset/')
+    parser.add_argument('--dataset',
+                        type=str,
+                        default='ogbn-products',
+                        choices=["ogbn-papers100M", "ogbn-products", "mag240M"])
     parser.add_argument("--cpu_process",
                         type=int,
                         default=1,
@@ -367,14 +378,17 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size",
                         type=int,
                         default=1024 * 5)
-    parser.add_argument('--dataset',
-                        type=str,
-                        default='ogbn-products',
-                        choices=["ogbn-papers100M", "ogbn-products", "mag240M"])
     parser.add_argument('--sampler',
                         type=str,
-                        default='shadow',
+                        default='neighbor',
                         choices=["neighbor", "shadow"])
+    parser.add_argument('--model',
+                        type=str,
+                        default='sage',
+                        choices=["sage", "gcn"])
+    parser.add_argument('--layer',
+                        type=int,
+                        default=3)
     arguments = parser.parse_args()
 
     # Assure Consistency
@@ -386,20 +400,25 @@ if __name__ == "__main__":
         arguments.gpu_process = 0
     nprocs = arguments.cpu_process + arguments.gpu_process
     assert nprocs > 0
-
-    print(f'Use {arguments.cpu_process} CPU Comp processes and {arguments.gpu_process} GPUs\n'
-          f'The batch size is {arguments.batch_size} with {arguments.cpu_gpu_ratio} cpu/gpu workload ratio')
+    print(f'\nUse {arguments.cpu_process} CPU Comp processes and {arguments.gpu_process} GPUs\n'
+          f'The batch size is {arguments.batch_size} with {arguments.cpu_gpu_ratio} cpu/gpu workload ratio\n'
+          f'Sampler: {arguments.sampler}, Model: {arguments.model}, Layer: {arguments.layer}\n')
 
     # load and preprocess dataset
+    print('Use Dataset:', arguments.dataset)
+    tik = time.time()
     if arguments.dataset == 'mag240M':
         dataset = MAG240MDataset(root='../HiPC')
+        print('Start Loading Graph Structure')
         (g,), _ = dgl.load_graphs('../HiPC/graph.dgl')
         g = g.formats(["csc"])
+        print('Graph Structure Loading Finished!')
         paper_offset = dataset.num_authors + dataset.num_institutions
         dataset.train_idx = torch.from_numpy(dataset.get_idx_split("train")) + paper_offset
         g.ndata["feat"] = fetch_datas_from_shm()
         g.ndata["label"] = torch.cat([torch.empty((paper_offset,), dtype=torch.long),
                                       torch.LongTensor(dataset.paper_label[:])])
+        print('Graph Feature/Label Loading Finished!')
     else:
         dataset = AsNodePredDataset(DglNodePropPredDataset(arguments.dataset, arguments.data_path))
         g = dataset[0]
@@ -415,12 +434,14 @@ if __name__ == "__main__":
         dataset.num_classes,
         dataset.train_idx,
     )
-    print("Data loading finished")
+    tok = time.time()
+    print(f"Data loading finished, Elapsed Time: {time.time() - tik: .1f}s\n")
 
     # multi-processes training
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29501'
-    # mp.set_start_method('spawn')
+
+    # train(0, nprocs, arguments, g, data)
     mp.set_start_method('fork')
     processes = []
     for i in range(nprocs):

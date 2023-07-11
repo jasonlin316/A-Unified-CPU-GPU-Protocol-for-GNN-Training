@@ -39,3 +39,21 @@ straightforward. I replace the [DDPTensorizedDataset](https://github.com/dmlc/dg
 class in DGL with a new class [UnevenDDPTensorizedDataset](https://github.com/jasonlin316/HiPC23/blob/main/mixture.py#L95). 
 This class splits the indices based on the `sub_batch_sizes` array while including all other features in the previous class.
 Note that there is no need to modify this class when changing batch size assignment logic.
+
+
+## Train on MAG240M
+### Load Feature Matrix to shm
+MAG240M dataset has a large feature matrix (380G). To reduce the memory consumption and feature loading time,
+we first load the required data into shared memory, then conduct one or more trials at the same time.
+  ```
+  python load_mag_to_shm.py
+  ```
+Note that `load_mag_to_shm.py` requires a large amount of available memory (roughly 800G) when copying data
+from disk to shared memory, and consumes a smaller amount of memory (roughly 400G) after movement completes.
+Be sure to spare enough memory during the data movement.
+
+### Training Instruction
+  ```
+  python mixture.py --cpu_process 2 --cpu_gpu_ratio 0.9 --dataset mag240M --sampler shadow --model sage --layer 5
+  ```
+For shadow sampler, reduce the neighbor budget can boost cpu speed relative to gpu。 

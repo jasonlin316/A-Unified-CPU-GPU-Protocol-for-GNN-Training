@@ -25,20 +25,17 @@ def host_datas(e):
         shape=MAG_FEATS_SHAPE,
     )
     print('Start Loading features, needs 400G available memory')
-    feats_mem = torch.HalfTensor(feats_disk[:])
-    print(feats_mem)
-    print(feats_mem.shape)
+    feats_mem = torch.from_numpy(feats_disk[:])
     print('Start moving features to shm')
     feats_shm = create_shared_mem_array(MAG_FEATS_KEY, MAG_FEATS_SHAPE, dtype=FEATS_TYPE)
     feats_shm[:] = feats_mem
     del feats_mem
 
     tok = time.time()
-    print(f'Loading data finished, total execution time:{tok - tik: .1f}')
+    print(f'Loading data finished, Total execution time:{tok - tik: .1f}s')
 
     print('Press Ctrl+C to exit')
-    while True:
-        time.sleep(1)
+    breakpoint()
 
 
 if __name__ == '__main__':
