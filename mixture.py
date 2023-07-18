@@ -293,19 +293,18 @@ def train(rank, world_size, args, g, data):
         )
         assert len(sampler.fanouts) == args.layer
     elif args.sampler.lower() == 'shadow':
-        sampler = ShaDowKHopSampler(
+        sampler = ShaDowKHopSampler(  # CPU sampling is 2x faster than GPU sampling
             [10, 5],
-            output_device=device,
+            output_device=device,  # comment out in CPU sampling version
             prefetch_node_feats=["feat"],
         )
     else:
         raise NotImplementedError
     train_dataloader = DataLoader(
         g,
-        train_indices,  # train_idx.to(device)
+        train_indices,
         sampler,
         device=device,
-        batch_size=get_subbatch_size(args),
         use_ddp=True,
         use_uva=not is_cpu_proc(args.cpu_process),
         drop_last=drop_last,
@@ -335,7 +334,7 @@ def train(rank, world_size, args, g, data):
                     ProfilerActivity.CPU
                 ],
                 record_shapes=True
-        ) if False else nullcontext() as prof:
+        ) if True else nullcontext() as prof:
             tik = time.time()
             if is_cpu_proc(args.cpu_process):
                 if params.get('load_core', None) is None or params.get('comp_core', None):
@@ -344,8 +343,8 @@ def train(rank, world_size, args, g, data):
             else:
                 loss = _train(**params)
             if rank == 0: print(f'Epoch Time: {time.time() - tik:.4f}')
-        # if epoch == 0:
-        #     prof.export_chrome_trace(TRACE_NAME.format(rank))
+        if epoch == 0:
+            prof.export_chrome_trace(TRACE_NAME.format(rank))
 
         dist.barrier()
 
@@ -377,7 +376,7 @@ if __name__ == "__main__":
                         default=0.5)
     parser.add_argument("--batch_size",
                         type=int,
-                        default=1024 * 5)
+                        default=1024 * 4)
     parser.add_argument('--sampler',
                         type=str,
                         default='neighbor',
@@ -451,9 +450,9 @@ if __name__ == "__main__":
     for p in processes:
         p.join()
 
-    # input_files = [TRACE_NAME.format(i) for i in range(nprocs)]
-    # merge_trace_files(input_files, OUTPUT_TRACE_NAME)
-    # for i in range(nprocs):
-    #     os.remove(TRACE_NAME.format(i))
+    input_files = [TRACE_NAME.format(i) for i in range(nprocs)]
+    merge_trace_files(input_files, OUTPUT_TRACE_NAME)
+    for i in range(nprocs):
+        os.remove(TRACE_NAME.format(i))
 
     print("Program finished")
