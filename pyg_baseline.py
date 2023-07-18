@@ -166,8 +166,7 @@ def run(rank, world_size, dataset, batch_size, cpu_gpu_ratio):
 
 
 if __name__ == '__main__':
-    # dataset = Reddit('/data/gangda/pyg/Reddit2')
-    dataset = PygNodePropPredDataset('ogbn-products', root='/data/gangda/ogb', )
+    dataset = PygNodePropPredDataset('ogbn-products', root='', )
 
 
     batch_size = 204

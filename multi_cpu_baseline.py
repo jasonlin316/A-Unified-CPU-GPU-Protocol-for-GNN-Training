@@ -204,7 +204,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_path',
                         type=str,
-                        default='/data/gangda/dgl')
+                        default='')
     parser.add_argument(
         "--mode",
         default="cpu",
