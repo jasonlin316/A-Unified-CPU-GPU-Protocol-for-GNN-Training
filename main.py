@@ -161,39 +161,6 @@ def is_cpu_proc(num_cpu_proc, rank=None):
     return rank < num_cpu_proc
 
 
-def assign_cores(num_cpu_proc):
-    assert is_cpu_proc(num_cpu_proc), "For CPU Comp process only"
-    rank = dist.get_rank()
-    load_core, comp_core = [], []
-    n = psutil.cpu_count(logical=False)
-    if num_cpu_proc == 1:
-        # comp_core = list(range(0, 64))
-        # load_core = list(range(64, 64+8))
-        load_core = list(range(0, 8))
-        comp_core = list(range(8, n))
-    elif num_cpu_proc == 2:
-        if rank == 0:
-            load_core = list(range(0, 4))
-            comp_core = list(range(4, n // 2))
-        else:
-            load_core = list(range(n // 2, n // 2 + 4))
-            comp_core = list(range(n // 2 + 4, n))
-    elif num_cpu_proc == 4:
-        if rank == 0:
-            load_core = list(range(0, 2))
-            comp_core = list(range(2, n // 4))
-        elif rank == 1:
-            load_core = list(range(n // 4, n // 4 + 2))
-            comp_core = list(range(n // 4 + 2, n // 2))
-        elif rank == 2:
-            load_core = list(range(n // 2, n // 2 + 2))
-            comp_core = list(range(n // 2 + 2, n // 4 * 3))
-        else:
-            load_core = list(range(n // 4 * 3, n // 4 * 3 + 2))
-            comp_core = list(range(n // 4 * 3 + 2, n))
-    return load_core, comp_core
-
-
 def get_subbatch_size(args, rank=None, cpu_gpu_ratio=None) -> int:
     if rank is None:
         rank = dist.get_rank()
@@ -295,8 +262,6 @@ def hybrid_train(args, config, func, params):
         _tik = time.time()
         cpu_runtime = gpu_runtime = 0
         if is_cpu_proc(args.cpu_process):
-            # if params.get('load_core', None) is None or params.get('comp_core', None):
-            #     params['load_core'], params['comp_core'] = assign_cores(args.cpu_process)
             with loader.enable_cpu_affinity(loader_cores=config['load_core'],
                                             compute_cores=config['comp_core']):
                 loss = func(**params)
