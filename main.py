@@ -32,7 +32,8 @@ from torch.nn.parallel import DistributedDataParallel
 import psutil
 
 from load_mag_to_shm import fetch_datas_from_shm
-from merge import merge_trace_files
+from manager import ResourceManager
+from utils import merge_trace_files
 
 TRACE_NAME = 'mixture_product_{}.json'
 OUTPUT_TRACE_NAME = "combine.json"
@@ -96,6 +97,7 @@ class UnevenDDPTensorizedDataset(torch.utils.data.IterableDataset):
         self.drop_last = drop_last
         self._shuffle = shuffle
 
+        # batch size
         self.prefix_sum_batch_size = sum(sub_batch_sizes[:self.rank])
         self.batch_size = sub_batch_sizes[self.rank]
 
@@ -118,6 +120,10 @@ class UnevenDDPTensorizedDataset(torch.utils.data.IterableDataset):
 
         self._indices = call_once_and_share(
             self._create_shared_indices, (self.shared_mem_size,), torch.int64)
+
+    def update_batch_size(self, sub_batch_sizes):
+        self.prefix_sum_batch_size = sum(sub_batch_sizes[:self.rank])
+        self.batch_size = sub_batch_sizes[self.rank]
 
     def _create_shared_indices(self):
         indices = torch.empty(self.shared_mem_size, dtype=torch.int64)
@@ -155,11 +161,6 @@ def is_cpu_proc(num_cpu_proc, rank=None):
     return rank < num_cpu_proc
 
 
-def device_mapping(num_cpu_proc):
-    assert not is_cpu_proc(num_cpu_proc), "For GPU Comp process only"
-    return dist.get_rank() - num_cpu_proc
-
-
 def assign_cores(num_cpu_proc):
     assert is_cpu_proc(num_cpu_proc), "For CPU Comp process only"
     rank = dist.get_rank()
@@ -193,11 +194,13 @@ def assign_cores(num_cpu_proc):
     return load_core, comp_core
 
 
-def get_subbatch_size(args, rank=None) -> int:
+def get_subbatch_size(args, rank=None, cpu_gpu_ratio=None) -> int:
     if rank is None:
         rank = dist.get_rank()
+    if cpu_gpu_ratio is None:
+        cpu_gpu_ratio = args.cpu_gpu_ratio
     world_size = dist.get_world_size()
-    cpu_batch_size = int(args.batch_size * args.cpu_gpu_ratio)
+    cpu_batch_size = int(args.batch_size * cpu_gpu_ratio)
     if is_cpu_proc(args.cpu_process, rank):
         return cpu_batch_size // args.cpu_process + \
             (cpu_batch_size % args.cpu_process if rank == args.cpu_process - 1 else 0)
@@ -206,7 +209,28 @@ def get_subbatch_size(args, rank=None) -> int:
             ((args.batch_size - cpu_batch_size) % args.gpu_process if rank == world_size - 1 else 0)
 
 
+def device_mapping(num_cpu_proc):
+    assert not is_cpu_proc(num_cpu_proc), "For GPU Comp process only"
+    return dist.get_rank() - num_cpu_proc
+
+
+def get_device(args):
+    device = torch.device("cpu" if is_cpu_proc(args.cpu_process)
+                          else "cuda:{}".format(device_mapping(args.cpu_process)))
+    if not is_cpu_proc(args.cpu_process):
+        torch.cuda.set_device(device)
+    return device
+
+
+def get_sample_workers(args):
+    if is_cpu_proc(args.cpu_process):
+        return 8 // args.cpu_process
+    else:
+        return 0
+
+
 def _train(loader, model, opt, **kwargs):
+    model.train()
     total_loss = 0
     if kwargs['rank'] == 0:
         pbar = tqdm(total=kwargs['train_size'])
@@ -243,43 +267,64 @@ def _train(loader, model, opt, **kwargs):
         total_loss += loss.item()  # avoid cuda memory accumulation
         if kwargs['rank'] == 0:
             pbar.update(kwargs['batch_size'])
-            # pbar.update(output_nodes.shape[0])
     if kwargs['rank'] == 0:
         pbar.close()
     return total_loss
 
 
-def _train_cpu(load_core, comp_core, **kwargs):
-    with kwargs['loader'].enable_cpu_affinity(loader_cores=load_core, compute_cores=comp_core):
-        loss = _train(**kwargs)
-    return loss
+def hybrid_train(args, config, func, params):
+    # for log only
+    rank = params['rank']
+    epoch = params['epoch']
+    num_batches = params['num_batches']
+    loader: DataLoader = params['loader']
+
+    # update cpu_gpu_ratio
+    sub_batch_sizes = [get_subbatch_size(args, r, config['cpu_gpu_ratio'])
+                       for r in range(dist.get_world_size())]
+    loader.indices.update_batch_size(sub_batch_sizes)
+    if rank == 0:
+        print(f'\nEpoch {epoch}, CPU/GPU workload ratio {config["cpu_gpu_ratio"]:.3f}')
+        print('SubBatch sizes:', sub_batch_sizes, '\n')
+
+    # start training
+    with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True
+    ) if True else nullcontext() as prof:
+        _tik = time.time()
+        cpu_runtime = gpu_runtime = 0
+        if is_cpu_proc(args.cpu_process):
+            # if params.get('load_core', None) is None or params.get('comp_core', None):
+            #     params['load_core'], params['comp_core'] = assign_cores(args.cpu_process)
+            with loader.enable_cpu_affinity(loader_cores=config['load_core'],
+                                            compute_cores=config['comp_core']):
+                loss = func(**params)
+                cpu_runtime = time.time() - _tik
+        else:
+            loss = func(**params)
+            gpu_runtime = time.time() - _tik
+        if rank == 0:
+            print(f'\nTraining loss: {loss / num_batches:.4f}')
+            print(f'Epoch Time: {time.time() - _tik:.3f}s\n')
+    if epoch == 0:
+        prof.export_chrome_trace(TRACE_NAME.format(rank))
+    return prof, cpu_runtime, gpu_runtime
 
 
 def train(rank, world_size, args, g, data):
     num_classes, train_idx = data
     dist.init_process_group('gloo', rank=rank, world_size=world_size)
-
-    device = torch.device("cpu" if is_cpu_proc(args.cpu_process)
-                          else "cuda:{}".format(device_mapping(args.cpu_process)))
-
-    if not is_cpu_proc(args.cpu_process):
-        torch.cuda.set_device(device)
-
-    # create GraphSAGE model
-    in_size = g.ndata["feat"].shape[1]
-    model = GNN(in_size, 128, num_classes,
-                num_layers=args.layer, model_name=args.model).to(device)
+    device = get_device(args)
+    model = GNN(g.ndata["feat"].size(-1), 128, num_classes, args.layer, model_name=args.model)
+    model = model.to(device)
     model = DistributedDataParallel(model)
-
-    # g = dgl.add_self_loop(g)  # for GCN model, not work for Mag
 
     # create loader
     drop_last, shuffle = True, True
     sub_batch_sizes = [get_subbatch_size(args, r) for r in range(world_size)]
-    if rank == 0: print('SubBatch sizes:', sub_batch_sizes)
     train_indices = UnevenDDPTensorizedDataset(
         train_idx.to(device),
-        # test_idx.to(device),
         args.batch_size,
         sub_batch_sizes,
         drop_last,
@@ -300,58 +345,41 @@ def train(rank, world_size, args, g, data):
         )
     else:
         raise NotImplementedError
-    train_dataloader = DataLoader(
+    train_loader = DataLoader(
         g,
         train_indices,
         sampler,
         device=device,
         use_ddp=True,
-        use_uva=not is_cpu_proc(args.cpu_process),
+        use_uva=device.type == 'cuda',
         drop_last=drop_last,
         shuffle=shuffle,
-        num_workers=int(8/args.cpu_process) if is_cpu_proc(args.cpu_process) else 0,
+        num_workers=get_sample_workers(args),
     )
 
     # training loop
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=5e-4)
+    manager = ResourceManager(args, is_cpu_proc(args.cpu_process))
     params = {
         # training
-        'loader': train_dataloader,
+        'loader': train_loader,
         'model': model,
-        'opt': opt,
+        'opt': torch.optim.Adam(model.parameters(), lr=1e-3),
         # logging
         'rank': rank,
         'train_size': len(train_indices),
         'batch_size': args.batch_size,
+        'num_batches': train_indices.num_batches,
         'device': device,
-        'process': args.cpu_process
+        'process': args.cpu_process,
+        'epoch': 0,
     }
     for epoch in range(2):
         params['epoch'] = epoch
-        model.train()
-        with profile(
-                activities=[
-                    ProfilerActivity.CPU
-                ],
-                record_shapes=True
-        ) if True else nullcontext() as prof:
-            tik = time.time()
-            if is_cpu_proc(args.cpu_process):
-                if params.get('load_core', None) is None or params.get('comp_core', None):
-                    params['load_core'], params['comp_core'] = assign_cores(args.cpu_process)
-                loss = _train_cpu(**params)
-            else:
-                loss = _train(**params)
-            if rank == 0: print(f'Epoch Time: {time.time() - tik:.4f}')
-        if epoch == 0:
-            prof.export_chrome_trace(TRACE_NAME.format(rank))
+
+        prof = hybrid_train(args, manager.config(), _train, params)
+        manager.update(prof)
 
         dist.barrier()
-
-        # TODO: val or test
-        if rank == 0:
-            print(f'Training loss: {loss / train_indices.num_batches:.4f}')
-
     dist.destroy_process_group()
 
 
@@ -366,7 +394,7 @@ if __name__ == "__main__":
                         choices=["ogbn-papers100M", "ogbn-products", "mag240M"])
     parser.add_argument("--cpu_process",
                         type=int,
-                        default=1,
+                        default=2,
                         choices=[0, 1, 2, 4])
     parser.add_argument("--gpu_process",
                         type=int,
@@ -434,11 +462,11 @@ if __name__ == "__main__":
         dataset.train_idx,
     )
     tok = time.time()
-    print(f"Data loading finished, Elapsed Time: {time.time() - tik: .1f}s\n")
+    print(f"Data loading finished, Elapsed Time: {time.time() - tik: .1f}s")
 
     # multi-processes training
     os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29501'
+    os.environ['MASTER_PORT'] = '29502'
 
     # train(0, nprocs, arguments, g, data)
     mp.set_start_method('fork')
