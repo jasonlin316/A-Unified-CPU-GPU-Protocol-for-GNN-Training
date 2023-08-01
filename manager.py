@@ -59,7 +59,7 @@ class ResourceManager:
         time_sample, time_compute, time_cpu, time_gpu = self.estimate_time()
         if abs(time_sample - time_compute) > self.threshold_1:
             if time_sample > time_compute:
-                self.num_sample_cores = max(8, self.num_sample_cores * 2)
+                self.num_sample_cores = min(8, self.num_sample_cores * 2)
             else:
                 self.num_sample_cores = max(2, self.num_sample_cores // 2)
         else:
