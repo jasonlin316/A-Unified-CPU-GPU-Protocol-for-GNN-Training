@@ -11,7 +11,7 @@ Note 2: Alternative approach to install TCMalloc: https://github.com/AUTOMATIC11
 ## Hybrid GNN Training
 ### Usage
   ```
-  python main.py --cpu_process 4 --gpu_process 1 --cpu_gpu_ratio 0.3 --dataset mag240M --sampler shadow --model sage --layer 5
+  python main.py --cpu_process 4 --gpu_process 1 --cpu_gpu_ratio 0.3 --dataset ogbn-products --sampler shadow --model sage --layer 5
   ```
   Important Arguments: 
   - `--cpu_process`: Number of CPU computing processes used in training. Available choices [0, 1, 2, 4]
