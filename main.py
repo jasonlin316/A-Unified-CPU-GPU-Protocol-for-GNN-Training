@@ -338,7 +338,7 @@ def train(rank, world_size, args, g, data):
         'process': args.cpu_process,
         'epoch': 0,
     }
-    for epoch in range(2):
+    for epoch in range(5):
         params['epoch'] = epoch
 
         prof = hybrid_train(args, manager.config(), _train, params)
@@ -443,9 +443,9 @@ if __name__ == "__main__":
     for p in processes:
         p.join()
 
-    input_files = [TRACE_NAME.format(i) for i in range(nprocs)]
-    merge_trace_files(input_files, OUTPUT_TRACE_NAME)
-    for i in range(nprocs):
-        os.remove(TRACE_NAME.format(i))
+    # input_files = [TRACE_NAME.format(i) for i in range(nprocs)]
+    # merge_trace_files(input_files, OUTPUT_TRACE_NAME)
+    # for i in range(nprocs):
+    #     os.remove(TRACE_NAME.format(i))
 
     print("Program finished")
