@@ -310,23 +310,12 @@ def train(rank, world_size, args, g, data):
         )
     else:
         raise NotImplementedError
-    train_loader = DataLoader(
-        g,
-        train_indices,
-        sampler,
-        device=device,
-        use_ddp=True,
-        use_uva=device.type == 'cuda',
-        drop_last=drop_last,
-        shuffle=shuffle,
-        num_workers=get_sample_workers(args),
-    )
-
+    
     # training loop
     manager = ResourceManager(args, is_cpu_proc(args.cpu_process))
     params = {
         # training
-        'loader': train_loader,
+        # 'loader': train_loader,
         'model': model,
         'opt': torch.optim.Adam(model.parameters(), lr=1e-3),
         # logging
@@ -339,7 +328,21 @@ def train(rank, world_size, args, g, data):
         'epoch': 0,
     }
     for epoch in range(5):
+        conf = manager.config()
+        train_loader = DataLoader(
+            g,
+            train_indices,
+            sampler,
+            device=device,
+            use_ddp=True,
+            use_uva=device.type == 'cuda',
+            drop_last=drop_last,
+            shuffle=shuffle,
+            num_workers=len(conf['load_core'])
+        )
+
         params['epoch'] = epoch
+        params['loader'] = train_loader
 
         prof = hybrid_train(args, manager.config(), _train, params)
         manager.update(prof)

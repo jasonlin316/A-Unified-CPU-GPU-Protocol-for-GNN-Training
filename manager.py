@@ -6,7 +6,7 @@ from torch._C._distributed_c10d import ReduceOp
 
 class ResourceManager:
 
-    def __init__(self, args, is_cpu, threshold_1=3e6, threshold_2=0.2):
+    def __init__(self, args, is_cpu, threshold_1=3e5, threshold_2=0.2):
         self.args = args
         self.is_cpu = is_cpu
         self.threshold_1 = threshold_1
@@ -16,7 +16,7 @@ class ResourceManager:
         self.time_compute = []  # μs
         self.time_cpu = []  # s
         self.time_gpu = []  # s
-        self.num_sample_cores = 8 // args.cpu_process
+        self.num_sample_cores = 4 // args.cpu_process
         self.cpu_gpu_ratio = args.cpu_gpu_ratio
 
     def reset(self):
@@ -24,7 +24,7 @@ class ResourceManager:
         self.time_compute = []
         self.time_cpu = []
         self.time_gpu = []
-        self.num_sample_cores = 8 // self.args.cpu_process
+        self.num_sample_cores = 4 // self.args.cpu_process
         self.cpu_gpu_ratio = self.args.cpu_gpu_ratio
 
     def config(self):
@@ -81,27 +81,7 @@ class ResourceManager:
         rank = dist.get_rank()
 
         load_core, comp_core = [], []
-        if num_cpu_proc == 1:
-            load_core = list(range(0, num_sample_cores))
-            comp_core = list(range(num_sample_cores, n))
-        elif num_cpu_proc == 2:
-            if rank == 0:
-                load_core = list(range(0, num_sample_cores))
-                comp_core = list(range(num_sample_cores, n // 2))
-            else:
-                load_core = list(range(n // 2, n // 2 + num_sample_cores))
-                comp_core = list(range(n // 2 + num_sample_cores, n))
-        elif num_cpu_proc == 4:
-            if rank == 0:
-                load_core = list(range(0, num_sample_cores))
-                comp_core = list(range(num_sample_cores, n // 4))
-            elif rank == 1:
-                load_core = list(range(n // 4, n // 4 + num_sample_cores))
-                comp_core = list(range(n // 4 + num_sample_cores, n // 2))
-            elif rank == 2:
-                load_core = list(range(n // 2, n // 2 + num_sample_cores))
-                comp_core = list(range(n // 2 + num_sample_cores, n // 4 * 3))
-            else:
-                load_core = list(range(n // 4 * 3, n // 4 * 3 + num_sample_cores))
-                comp_core = list(range(n // 4 * 3 + num_sample_cores, n))
+        load_core = list(range(n//num_cpu_proc*rank,n//num_cpu_proc*rank+num_sample_cores))
+        comp_core = list(range(n//num_cpu_proc*rank+num_sample_cores,n//num_cpu_proc*(rank+1)))
+        
         return load_core, comp_core
