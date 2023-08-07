@@ -24,7 +24,7 @@ Note 2: Alternative approach to install TCMalloc: https://github.com/AUTOMATIC11
   - `--layer`: number of GNN layers.
   
   Hint: arguments `--cpu_process` and `--gpu_process` can be set to 0 for baseline comparison.  
-  Note: while we only test our library using three datasets, two samplers, and two types of GNN model, other setups should also work as our library is compatible with DGL.  
+  Note: while we only test our library using three datasets, two samplers, and two types of GNN model, other setups should also work as our library is compatible with DGL. Please refer to the [DGL document](https://docs.dgl.ai) for a full list of available sampler, GNN models, etc.  
   Note 2: large memory space (512 GB or above) is highly recommended. 
 
 ### Code Explanation
