@@ -5,13 +5,13 @@ import torch
 import numpy as np
 from dgl.utils.shared_mem import create_shared_mem_array, get_shared_mem_array
 
-FEATS_DIR = '/home/jason/HiPC/full.npy'
+FEATS_DIR = '/data/jason/HiPC/full.npy'
 FEATS_TYPE = torch.float16
 
 MAG_FEATS_KEY = 'MAG240_feat_full'
 MAG_FEATS_SHAPE = (244160499, 768)
 
-def fetch_datas_from_shm():
+def fetch_mag_from_shm():
     return get_shared_mem_array(MAG_FEATS_KEY, MAG_FEATS_SHAPE, dtype=FEATS_TYPE)
 
 

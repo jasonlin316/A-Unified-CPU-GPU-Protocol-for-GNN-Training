@@ -1,5 +1,14 @@
 import json
 
+
+class Dict(dict):
+
+    def __getattr__(self, key):
+        return self.get(key)
+
+    def __setattr__(self, key, value):
+        self[key] = value
+
 def merge_trace_files(input_files, output_file):
     merged_trace = []
 
