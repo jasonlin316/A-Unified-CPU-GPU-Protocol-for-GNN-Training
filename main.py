@@ -32,10 +32,10 @@ from layer import SAGEConv2
 from load_mag_to_shm import fetch_mag_from_shm
 from load_papers_to_shm import fetch_papers_from_shm
 from manager import ResourceManager
-from utils import merge_trace_files
+from utils import merge_trace_files, loss_fn
 
 TRACE_NAME = 'mixture_product_{}.json'
-OUTPUT_TRACE_NAME = "profile/combine.json"
+OUTPUT_TRACE_DIR = "profile/"
 
 
 class GNN(nn.Module):
@@ -145,8 +145,6 @@ def _train(loader, model, opt, **kwargs):
         if it == 1:
             dist.barrier()
             loader_init_time = time.time() - tik_init
-            # if kwargs['rank'] == 0:
-            #     print(f'Loader Init: {loader_init_time:.4f}s')
         if it == kwargs['num_batches'] - 1:
             dist.barrier()
             tik_end = time.time()
@@ -156,22 +154,15 @@ def _train(loader, model, opt, **kwargs):
         # if dist.get_rank() == 0:
         #     print()
 
-        # if it + 1 == 50: break
         if hasattr(blocks, '__len__'):
             x = blocks[0].srcdata["feat"].to(torch.float32)
-            y = blocks[-1].dstdata["label"]
+            y = blocks[-1].dstdata["label"].to(device)
         else:
             x = blocks.srcdata["feat"].to(torch.float32)
-            y = blocks.dstdata["label"]
-        # y_hat = model(blocks, x)
-        if kwargs['device'] == "cpu":  # for papers100M
-            y = y.type(torch.LongTensor)
-            y_hat = model(blocks, x)
-        else:
-            y = y.type(torch.LongTensor).to(device)
-            y_hat = model(blocks, x).to(device)
-        loss = F.cross_entropy(y_hat[:output_nodes.shape[0]],
-                               y[:output_nodes.shape[0]])
+            y = blocks.dstdata["label"].to(device)
+
+        y_hat = model(blocks, x)
+        loss = loss_fn(y_hat[:output_nodes.shape[0]], y[:output_nodes.shape[0]])
 
         # print(dist.get_rank(), 2)
 
@@ -181,8 +172,8 @@ def _train(loader, model, opt, **kwargs):
 
         # print(dist.get_rank(), 3)
 
-        del input_nodes, output_nodes, blocks
-        torch.cuda.empty_cache()
+        # del input_nodes, output_nodes, blocks
+        # torch.cuda.empty_cache()
 
         total_loss += loss.item()  # avoid cuda memory accumulation
         if kwargs['rank'] == 0:
@@ -219,15 +210,16 @@ def hybrid_train(args, config, func, params):
     # start training
     with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            # schedule=torch.profiler.schedule(
-            #     skip_first=8,
-            #     wait=4,
-            #     warmup=1,
-            #     active=3,
-            #     repeat=5
-            # ),
+            schedule=torch.profiler.schedule(
+                skip_first=8,
+                wait=4,
+                warmup=1,
+                active=10,
+                repeat=2
+            ),
     ) if args.log else nullcontext() as prof:
         params['prof'] = prof
+        dist.barrier()
         _tik = time.time()
         cpu_runtime = gpu_runtime = 0
         if is_cpu_proc(args.cpu_process):
@@ -238,14 +230,20 @@ def hybrid_train(args, config, func, params):
         else:
             loss, loader_init_time, loader_close_time = func(**params)
             gpu_runtime = time.time() - _tik
-        if rank == 0:
-            print(f'\nTraining loss: {loss / num_batches:.4f}')
-            total_epoch_time = time.time() - _tik
-            print(f'Total Epoch Time: {total_epoch_time:.3f}s')
-            print(f'Epoch Time w/o loader overhead:'
-                  f' {total_epoch_time - loader_init_time - loader_close_time:.3f}s\n')
-    if epoch == 2 and prof:
-        prof.export_chrome_trace(TRACE_NAME.format(rank))
+        dist.barrier()
+        total_epoch_time = time.time() - _tik
+        actual_epoch_time = total_epoch_time - loader_init_time - loader_close_time
+    if rank == 0:
+        print(f'\nTraining loss: {loss / num_batches:.4f}')
+        print(f'Total Epoch Time: {total_epoch_time:.3f}s')
+        print(f'Epoch Time w/o loader overhead: {actual_epoch_time:.3f}s\n')
+    if args.cpu_process == 0:
+        if epoch == 5:
+            prof.export_chrome_trace(TRACE_NAME.format(rank))
+    else:
+        if prof and actual_epoch_time < params['min_epoch_time']:
+            params['min_epoch_time'] = actual_epoch_time
+            prof.export_chrome_trace(TRACE_NAME.format(rank))
     return prof, cpu_runtime, gpu_runtime
 
 
@@ -267,7 +265,6 @@ def train(rank, world_size, args):
 
     sub_batch_sizes = [get_subbatch_size(args, r) for r in range(world_size)]
 
-    # workload = torch.load('processed/ogbn-products_neighbor_[30, 20, 10].pt')
     workload = torch.load('processed/{}_neighbor_{}_{}_matrix.pt'.format(
         args.dataset, fanouts, wl_batch))
     # if args.cpu_gpu_ratio > 0:
@@ -324,25 +321,24 @@ def train(rank, world_size, args):
         'device': device,
         'process': args.cpu_process,
         'epoch': 0,
+        'min_epoch_time': float('inf'),
         # 'CPU_SUBGRAPH_CACHE': [None for _ in range(num_batches)],  # init cache
     }
 
-    for epoch in range(10):
+    for epoch in range(20):
         conf = manager.config()
-        if rank == 0:
-            print()
-            print(conf)
-            print()
+        print(conf)
+        # gpu_cache = {"node": {"feat": int(g.ndata['feat'].shape[0]*0.4)}} if device.type == 'cuda' else {}
         train_loader = DataLoader(
             g,
             train_indices,
             sampler,
-            # batch_size=sub_batch_sizes[rank],
             device=device,
             use_uva=device.type == 'cuda',
             drop_last=drop_last,
             shuffle=shuffle,
             num_workers=len(conf['load_core']),
+            gpu_cache={"node": {"feat": int(g.ndata['feat'].shape[0]*args.cached_ratio)}} if device.type == 'cuda' else {}
         )
 
         params['epoch'] = epoch
@@ -352,6 +348,8 @@ def train(rank, world_size, args):
         # manager.update(prof)  # comment on this line to disable Resource Manager
 
         dist.barrier()
+    if rank == 0:
+        print(f'min_epoch_time: {params["min_epoch_time"]:.3f}')
     dist.destroy_process_group()
 
 
@@ -363,7 +361,8 @@ if __name__ == "__main__":
     parser.add_argument('--dataset',
                         type=str,
                         default='ogbn-products',
-                        choices=["ogbn-papers100M", "ogbn-products", "mag240M"])
+                        choices=["ogbn-papers100M", "ogbn-products", "ogbn-arxiv", "mag240M",
+                                 "reddit", "yelp"])
     parser.add_argument("--cpu_process",
                         type=int,
                         default=2,
@@ -392,6 +391,12 @@ if __name__ == "__main__":
                         type=str,
                         default='none',
                         choices=['none', 'static', 'dynamic', 'dynamic_hard', 'skip'])
+    parser.add_argument('--skip_delta',
+                        type=float,
+                        default=0.01)
+    parser.add_argument('--cached_ratio',
+                        type=float,
+                        default=0.4)
     parser.add_argument('--log', action='store_true')
     arguments = parser.parse_args()
 
@@ -402,6 +407,7 @@ if __name__ == "__main__":
     if arguments.cpu_gpu_ratio == 0 or arguments.cpu_process == 0:
         arguments.cpu_gpu_ratio = 0
         arguments.cpu_process = 0
+        arguments.cached_ratio = 0
     if arguments.cpu_gpu_ratio == 1 or arguments.gpu_process == 0:
         arguments.cpu_gpu_ratio = 1
         arguments.gpu_process = 0
@@ -425,7 +431,9 @@ if __name__ == "__main__":
         p.join()
 
     input_files = [TRACE_NAME.format(i) for i in range(nprocs)]
-    merge_trace_files(input_files, OUTPUT_TRACE_NAME)
+    mtype = 'gpu' if arguments.cpu_gpu_ratio == 0 else arguments.batch_type
+    merge_trace_files(input_files, OUTPUT_TRACE_DIR +
+                      '{}_{}.json'.format(arguments.dataset, mtype))
     for i in range(nprocs):
         os.remove(TRACE_NAME.format(i))
 

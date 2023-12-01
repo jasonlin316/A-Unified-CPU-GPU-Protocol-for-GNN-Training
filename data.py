@@ -1,9 +1,10 @@
+import argparse
 import math
 
 import dgl
 import numpy as np
 import torch
-from dgl.data import AsNodePredDataset
+from dgl.data import AsNodePredDataset, RedditDataset, YelpDataset
 from ogb.lsc import MAG240MDataset
 from ogb.nodeproppred import DglNodePropPredDataset
 
@@ -30,10 +31,14 @@ def get_data(name, data_path):
         print('Graph Feature/Label Loading Finished!')
     elif name == 'ogbn-papers100M':
         dataset, g = fetch_papers_from_shm()
-    else:
+    elif 'ogbn' in name:
         dataset = AsNodePredDataset(DglNodePropPredDataset(name, data_path))
         g = dataset[0]
-
+    else:
+        dataset = YelpDataset(raw_dir=data_path)
+        g = dataset[0]
+        train_idx = g.ndata['train_mask'].nonzero().view(-1)
+        return dataset.num_classes, train_idx, g
     """
     Note 1: This func avoid creating certain graph formats in each sub-process to save memory
     Note 2: This func will init CUDA. It is not possible to use CUDA in a child process 
@@ -64,6 +69,7 @@ class UnevenDDPTensorizedDataset(torch.utils.data.IterableDataset):
         self.total_batch_size = total_batch_size
         self.sub_batch_sizes = sub_batch_sizes
         self.workload = indices_workload
+        self.s_wl = torch.cumsum(indices_workload.sort().values, dim=0)
         self.args = args
 
         # batch size
@@ -110,26 +116,33 @@ class UnevenDDPTensorizedDataset(torch.utils.data.IterableDataset):
         dist.barrier()
 
     def __iter__(self):
-        # hard coding
-        if self.args.dataset == 'ogbn-products':
-            dynamic_threshold = 120
-            skip_threshold = 405000
-        elif self.args.dataset == 'ogbn-papers100M':
-            dynamic_threshold = 0.001
-            skip_threshold = 100
-        else:
-            dynamic_threshold = 1
-            skip_threshold = 1
-        dynamic_threshold *= self.total_batch_size
-        skip_workload = self.args.cpu_process
+        # if self.args.dataset == 'ogbn-products':
+        #     # dynamic_threshold = 720
+        #     threshold = self.s_wl[int(self.args.cpu_gpu_ratio*self.s_wl.shape[0])]
+        #     skip_threshold = 405000
+        # elif self.args.dataset == 'ogbn-papers100M':
+        #     threshold = 0.001
+        #     skip_threshold = 100
+        # else:
+        #     threshold = 1
+        #     skip_threshold = 1
 
-        if self.args.batch_type == 'none' or self.args.cpu_process == 0:
+
+        if self.args.batch_type == 'none' or self.args.cpu_process == 0 or self.args.gpu_process == 0:
             batch_sizes = [self.batch_size] * self.num_batches
             start = self.prefix_sum_batch_size[self.rank] * self.num_batches
             end = start + self.batch_size * self.num_batches
             indices = self._indices[start:end]
             indices = _divide_by_worker(indices, self.batch_size, self.drop_last)
         else:
+            skip_workload = self.args.cpu_process
+            idx = int(self.args.cpu_gpu_ratio * self.s_wl.shape[0])
+            dynamic_threshold = (self.s_wl[
+                                     idx] / idx) * self.total_batch_size * self.args.cpu_gpu_ratio
+            idx2 = int((self.args.cpu_gpu_ratio + self.args.skip_delta) * self.s_wl.shape[0])
+            skip_threshold = (self.s_wl[
+                                  idx2] / idx2) * self.total_batch_size * self.args.cpu_gpu_ratio
+
             indices, batch_sizes = [], []
             worker_info = torch.utils.data.get_worker_info()
             for b_id in range(self.num_batches):
@@ -141,7 +154,7 @@ class UnevenDDPTensorizedDataset(torch.utils.data.IterableDataset):
 
                 if 'dynamic' in self.args.batch_type:
                     w_val = torch.cumsum(w_val, dim=0)
-                    pivot = torch.searchsorted(w_val, dynamic_threshold)
+                    pivot = torch.searchsorted(w_val, dynamic_threshold, side='right')
                     if 'hard' in self.args.batch_type:
                         pivot = min(pivot, self.prefix_sum_batch_size[self.args.cpu_process])
                 else:
@@ -149,7 +162,6 @@ class UnevenDDPTensorizedDataset(torch.utils.data.IterableDataset):
                     if self.args.batch_type == 'skip':
                         if w_val[:pivot].sum() > skip_threshold:
                             pivot = skip_workload
-
                 if self.rank < self.args.cpu_process:
                     partial_batch_index = batch_index[:pivot]
                     idx = partial_batch_index[self.rank::self.args.cpu_process]
@@ -242,7 +254,6 @@ class DynamicTensorizedDatasetIter(object):
     def __next__(self):
         batch = self._next_indices()
         if self.mapping_keys is None:
-            # clone() fixes #3755, probably.  Not sure why.  Need to take a look afterwards.
             return batch.clone()
 
         # convert the type-ID pairs to dictionary
@@ -265,3 +276,14 @@ class DynamicTensorizedDatasetIter(object):
         }
         return id_dict
 
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset',
+                        type=str,
+                        default='ogbn-products')
+    parser.add_argument('--data_path',
+                        type=str,
+                        default='/data/gangda')
+    args = parser.parse_args()
+    get_data(args.dataset, args.data_path)

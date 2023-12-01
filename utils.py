@@ -1,5 +1,8 @@
 import json
 
+import torch
+import torch.nn.functional as F
+
 
 class Dict(dict):
 
@@ -29,6 +32,15 @@ def merge_trace_files(input_files, output_file):
     # Write the merged trace to the output file
     with open(output_file, 'w') as f:
         json.dump(merged_data, f)
+
+
+def loss_fn(y_hat, y):
+    if y.dim() > 1:
+        y_hat = torch.sigmoid(y_hat)
+        loss = F.binary_cross_entropy(y_hat, y.to(torch.float))
+    else:
+        loss = F.cross_entropy(y_hat, y.to(torch.long))
+    return loss
 
 
 if __name__ == '__main__':

@@ -114,9 +114,9 @@ class ResourceManager:
         # num_cpu_proc is 4, workload 0.25
         # products
         # cores_per_proc = 14
-        # num_sample_cores = 2
+        # num_sample_cores = 1
 
         load_core = list(range(cores_per_proc*rank, cores_per_proc*rank+num_sample_cores))
         comp_core = list(range(cores_per_proc*rank+num_sample_cores, cores_per_proc*(rank+1)))
-        
+
         return load_core, comp_core

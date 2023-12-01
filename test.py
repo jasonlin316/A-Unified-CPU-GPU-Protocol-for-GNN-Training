@@ -11,6 +11,8 @@ from ogb.nodeproppred import DglNodePropPredDataset
 from tqdm import tqdm
 import dgl.sparse as dglsp
 
+from data import get_data
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--sampler',
                     type=str,
@@ -22,10 +24,12 @@ parser.add_argument('--batch_size',
 parser.add_argument('--device',
                     type=int,
                     default=0,)
+parser.add_argument('--data_path',
+                        type=str,
+                        default='/data/gangda')
 parser.add_argument('--dataset',
                     type=str,
-                    default='ogbn-products',
-                    choices=["ogbn-papers100M", "ogbn-products", "mag240M"])
+                    default='ogbn-products')
 parser.add_argument('--matrix', action='store_true')
 args = parser.parse_args()
 
@@ -33,15 +37,11 @@ fanouts = [15, 10, 5]
 # fanouts = [30, 20, 10]
 # fanouts = [5, 10, 15]
 
-dataset = AsNodePredDataset(DglNodePropPredDataset(args.dataset, '/home/jason/DDP_GNN/dataset/'))
-g = dataset[0]
-train_idx = dataset.train_idx
+num_classes, train_idx, g = get_data(args.dataset, args.data_path)
 
 if args.sampler.lower() == 'neighbor':
     sampler = NeighborSampler(
         fanouts,
-        prefetch_node_feats=["feat"],
-        prefetch_labels=["label"],
     )
 elif args.sampler.lower() == 'shadow':
     sampler = ShaDowKHopSampler(  # CPU sampling is 2x faster than GPU sampling
@@ -92,4 +92,3 @@ avg_traversed = torch.stack(avg_traversed).float().mean(dim=0)
 file_name = '{}_{}_{}_{}'.format(args.dataset, args.sampler, str(fanouts), args.batch_size) + \
             ('_matrix' if args.matrix else '')
 torch.save(avg_traversed.cpu(), "processed/{}.pt".format(file_name))
-breakpoint()
