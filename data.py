@@ -151,6 +151,7 @@ class UnevenDDPTensorizedDataset(torch.utils.data.IterableDataset):
 
                 w_val, w_idx = self.workload[batch_index].sort()
                 batch_index = batch_index[w_idx]
+                # w_val = self.workload[batch_index]
 
                 if 'dynamic' in self.args.batch_type:
                     w_val = torch.cumsum(w_val, dim=0)

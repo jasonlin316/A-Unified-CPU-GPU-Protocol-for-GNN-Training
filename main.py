@@ -151,7 +151,7 @@ def _train(loader, model, opt, **kwargs):
 
         # print(dist.get_rank(), output_nodes.shape[0])
         # dist.barrier()
-        # if dist.get_rank() == 0:
+        # if dst.get_rank() == 0:
         #     print()
 
         if hasattr(blocks, '__len__'):
@@ -238,12 +238,12 @@ def hybrid_train(args, config, func, params):
         print(f'Total Epoch Time: {total_epoch_time:.3f}s')
         print(f'Epoch Time w/o loader overhead: {actual_epoch_time:.3f}s\n')
     if args.cpu_process == 0:
-        if epoch == 5:
+        if prof and epoch == 5:
             prof.export_chrome_trace(TRACE_NAME.format(rank))
     else:
-        if prof and actual_epoch_time < params['min_epoch_time']:
+        if actual_epoch_time < params['min_epoch_time']:
             params['min_epoch_time'] = actual_epoch_time
-            prof.export_chrome_trace(TRACE_NAME.format(rank))
+            if prof: prof.export_chrome_trace(TRACE_NAME.format(rank))
     return prof, cpu_runtime, gpu_runtime
 
 
