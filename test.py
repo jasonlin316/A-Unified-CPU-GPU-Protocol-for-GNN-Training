@@ -71,11 +71,18 @@ if args.matrix:
     for run in range(runs):
         num_traversed_edges = []
         for nid, (input_nodes, output_nodes, blocks) in tqdm(enumerate(loader)):
-            X = torch.ones(blocks[0].num_src_nodes(), dtype=torch.float).to(args.device)
-            for block in blocks:
-                A = dglsp.spmatrix(torch.stack(block.edges()),
-                                   shape=(block.num_src_nodes(), block.num_dst_nodes()))
-                X = A.T @ X
+            X = torch.ones(input_nodes.shape, dtype=torch.float).to(args.device)
+            if hasattr(blocks, '__len__'):
+                for block in blocks:
+                    A = dglsp.spmatrix(torch.stack(block.edges()),
+                                       shape=(block.num_src_nodes(), block.num_dst_nodes()))
+                    X = A.T @ X
+            else:
+                for i in range(len(fanouts)):
+                    A = dglsp.spmatrix(torch.stack(blocks.edges()),
+                                       shape=(blocks.num_src_nodes(), blocks.num_dst_nodes()))
+                    X = A.T @ X
+                X = X[:output_nodes.shape[0]]
             num_traversed_edges.append(X)
         avg_traversed.append(torch.cat(num_traversed_edges))
 else:

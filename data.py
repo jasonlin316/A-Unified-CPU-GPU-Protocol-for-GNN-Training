@@ -127,7 +127,6 @@ class UnevenDDPTensorizedDataset(torch.utils.data.IterableDataset):
         #     threshold = 1
         #     skip_threshold = 1
 
-
         if self.args.batch_type == 'none' or self.args.cpu_process == 0 or self.args.gpu_process == 0:
             batch_sizes = [self.batch_size] * self.num_batches
             start = self.prefix_sum_batch_size[self.rank] * self.num_batches

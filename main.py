@@ -51,7 +51,7 @@ class GNN(nn.Module):
             self.layers.append(SAGEConv(hid_size, out_size, "mean"))
         # GCN
         elif model_name.lower() == 'gcn':
-            kwargs = {'norm': 'both', 'weight': True, 'bias': True, 'allow_zero_in_degree': True}
+            kwargs = {}
             self.layers.append(dglnn.GraphConv(in_size, hid_size, **kwargs))
             for i in range(num_layers - 2):
                 self.layers.append(dglnn.GraphConv(hid_size, hid_size, **kwargs))
@@ -171,7 +171,6 @@ def _train(loader, model, opt, **kwargs):
         opt.step()
 
         # print(dist.get_rank(), 3)
-
         # del input_nodes, output_nodes, blocks
         # torch.cuda.empty_cache()
 
@@ -181,6 +180,10 @@ def _train(loader, model, opt, **kwargs):
 
         if kwargs['prof']:
             kwargs['prof'].step()
+
+        # if it == 50:
+        #     tik_end = time.time()
+        #     break
 
     dist.barrier()
     loader_close_time = time.time() - tik_end
@@ -249,6 +252,8 @@ def hybrid_train(args, config, func, params):
 
 def train(rank, world_size, args):
     num_classes, train_idx, g = get_data(args.dataset, args.data_path)
+    if args.model == 'gcn' and args.dataset != 'mag240M':
+        g = dgl.add_self_loop(g)
 
     dist.init_process_group('gloo', rank=rank, world_size=world_size)
     device = get_device(args)
@@ -325,7 +330,7 @@ def train(rank, world_size, args):
         # 'CPU_SUBGRAPH_CACHE': [None for _ in range(num_batches)],  # init cache
     }
 
-    for epoch in range(20):
+    for epoch in range(10):
         conf = manager.config()
         print(conf)
         # gpu_cache = {"node": {"feat": int(g.ndata['feat'].shape[0]*0.4)}} if device.type == 'cuda' else {}
@@ -345,6 +350,9 @@ def train(rank, world_size, args):
         params['loader'] = train_loader
 
         prof = hybrid_train(args, manager.config(), _train, params)
+        if prof[0] and rank == args.cpu_process + args.gpu_process - 1:
+            print(prof[0].key_averages().table(sort_by="cpu_time_total", row_limit=10))
+            print(prof[0].key_averages().table(sort_by="cuda_time_total", row_limit=10))
         # manager.update(prof)  # comment on this line to disable Resource Manager
 
         dist.barrier()
