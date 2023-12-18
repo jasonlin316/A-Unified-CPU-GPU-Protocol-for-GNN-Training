@@ -4,7 +4,7 @@ import torch.distributed as dist
 from torch._C._distributed_c10d import ReduceOp
 
 
-class ResourceManager:
+class DynamicLoadBalancer:
 
     def __init__(self, args, is_cpu, threshold_1=0.3, threshold_2=0.01):
 

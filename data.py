@@ -49,7 +49,7 @@ def get_data(name, data_path):
     return dataset.num_classes, dataset.train_idx, g
 
 
-class UnevenDDPTensorizedDataset(torch.utils.data.IterableDataset):
+class UnevenDDPIndices(torch.utils.data.IterableDataset):
     """Custom Dataset wrapper that returns a minibatch as tensors or dicts of tensors.
     When the dataset is on the GPU, this significantly reduces the overhead.
 

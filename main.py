@@ -27,11 +27,11 @@ import torch.multiprocessing as mp
 import dgl.multiprocessing as dmp
 from torch.nn.parallel import DistributedDataParallel
 
-from data import get_data, UnevenDDPTensorizedDataset
+from data import get_data, UnevenDDPIndices
 from layer import SAGEConv2
 from load_mag_to_shm import fetch_mag_from_shm
 from load_papers_to_shm import fetch_papers_from_shm
-from manager import ResourceManager
+from manager import DynamicLoadBalancer
 from utils import merge_trace_files, loss_fn
 
 TRACE_NAME = 'mixture_product_{}.json'
@@ -285,7 +285,7 @@ def train(rank, world_size, args):
     #                     num_batches * bsizes_psum[rank - 1]: num_batches * bsizes_psum[rank]]
     # print(rank, train_indices, len(train_indices))
 
-    train_indices = UnevenDDPTensorizedDataset(
+    train_indices = UnevenDDPIndices(
         train_idx.to(device),
         args.batch_size,
         sub_batch_sizes,
@@ -311,7 +311,7 @@ def train(rank, world_size, args):
         raise NotImplementedError
     
     # training loop
-    manager = ResourceManager(args, is_cpu_proc(args.cpu_process))
+    balancer = DynamicLoadBalancer(args, is_cpu_proc(args.cpu_process))
     params = {
         # training
         'model': model,
@@ -331,9 +331,8 @@ def train(rank, world_size, args):
     }
 
     for epoch in range(10):
-        conf = manager.config()
+        conf = balancer.config()
         print(conf)
-        # gpu_cache = {"node": {"feat": int(g.ndata['feat'].shape[0]*0.4)}} if device.type == 'cuda' else {}
         train_loader = DataLoader(
             g,
             train_indices,
@@ -349,11 +348,11 @@ def train(rank, world_size, args):
         params['epoch'] = epoch
         params['loader'] = train_loader
 
-        prof = hybrid_train(args, manager.config(), _train, params)
+        prof = hybrid_train(args, balancer.config(), _train, params)
         if prof[0] and rank == args.cpu_process + args.gpu_process - 1:
             print(prof[0].key_averages().table(sort_by="cpu_time_total", row_limit=10))
             print(prof[0].key_averages().table(sort_by="cuda_time_total", row_limit=10))
-        # manager.update(prof)  # comment on this line to disable Resource Manager
+        # balancer.update(prof)  # comment on this line to disable balancer
 
         dist.barrier()
     if rank == 0:
