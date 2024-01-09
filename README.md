@@ -1,4 +1,4 @@
-# Setup
+## Setup
 
 1. Setup a Python environment (>=3.11). Install PyTorch (>=2.0.1) and Deep Graph Library (>=1.1).
 2. Install TCMalloc:  https://google.github.io/tcmalloc/quickstart.html  
@@ -8,7 +8,6 @@ Note 2: Alternative approach to install TCMalloc: https://github.com/AUTOMATIC11
 ``` LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4.5.3 python main.py```
 
 
-# Hybrid GNN Training
 ## Usage
 ### 1. Download dataset:  
 ```
