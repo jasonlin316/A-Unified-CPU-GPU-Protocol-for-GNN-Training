@@ -14,7 +14,7 @@ Note 2: Alternative approach to install TCMalloc: https://github.com/AUTOMATIC11
 python dataset.py --dataset ogbn-products --data_path your_data_path
 ```
 ### 2. (Optional) Load feature matrix into shared memory:  
-MAG240M datasets have large feature matrices (56G and 380G). To reduce the memory consumption and feature loading time, we first load the required data into the shared memory, then conduct one or more trials at the same time.  
+MAG240M datasets have large feature matrices (380G). To reduce the memory consumption and feature loading time, we first load the required data into the shared memory, then conduct one or more trials at the same time.  
 ```
 python load_mag_to_shm.py --data_path your_data_path
 ```   
