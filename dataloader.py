@@ -1,52 +1,9 @@
-import argparse
-import math
-
-import dgl
-import numpy as np
 import torch
-from dgl.data import AsNodePredDataset, RedditDataset, YelpDataset
-from ogb.lsc import MAG240MDataset
-from ogb.nodeproppred import DglNodePropPredDataset
-
-from load_mag_to_shm import fetch_mag_from_shm
-from load_papers_to_shm import fetch_papers_from_shm
-
+import math
+import numpy as np
 import torch.distributed as dist
 from dgl.multiprocessing import call_once_and_share
 from dgl.dataloading.dataloader import _divide_by_worker
-
-
-def get_data(name, data_path):
-    if name == 'mag240M':
-        dataset = MAG240MDataset(root=data_path+'/HiPC')
-        print('Start Loading Graph Structure')
-        (g,), _ = dgl.load_graphs(data_path+'/HiPC/graph.dgl')
-        g = g.formats(["csc"])
-        print('Graph Structure Loading Finished!')
-        paper_offset = dataset.num_authors + dataset.num_institutions
-        dataset.train_idx = torch.from_numpy(dataset.get_idx_split("train")) + paper_offset
-        g.ndata["feat"] = fetch_mag_from_shm()
-        g.ndata["label"] = torch.cat([torch.empty((paper_offset,), dtype=torch.long),
-                                      torch.LongTensor(dataset.paper_label[:])])
-        print('Graph Feature/Label Loading Finished!')
-    elif name == 'ogbn-papers100M':
-        dataset, g = fetch_papers_from_shm()
-    elif 'ogbn' in name:
-        dataset = AsNodePredDataset(DglNodePropPredDataset(name, data_path))
-        g = dataset[0]
-    else:
-        dataset = YelpDataset(raw_dir=data_path)
-        g = dataset[0]
-        train_idx = g.ndata['train_mask'].nonzero().view(-1)
-        return dataset.num_classes, train_idx, g
-    """
-    Note 1: This func avoid creating certain graph formats in each sub-process to save memory
-    Note 2: This func will init CUDA. It is not possible to use CUDA in a child process 
-            created by fork(), if CUDA has been initialized in the parent process. 
-    """
-    # g.create_formats_()
-
-    return dataset.num_classes, dataset.train_idx, g
 
 
 class UnevenDDPIndices(torch.utils.data.IterableDataset):
@@ -71,6 +28,7 @@ class UnevenDDPIndices(torch.utils.data.IterableDataset):
         self.workload = indices_workload
         self.s_wl = torch.cumsum(indices_workload.sort().values, dim=0)
         self.args = args
+        self.cpu_gpu_ratio = args.cpu_gpu_ratio
 
         # batch size
         self.prefix_sum_batch_size = [sum(sub_batch_sizes[:j + 1]) for j in range(len(sub_batch_sizes))]
@@ -118,7 +76,7 @@ class UnevenDDPIndices(torch.utils.data.IterableDataset):
     def __iter__(self):
         # if self.args.dataset == 'ogbn-products':
         #     # dynamic_threshold = 720
-        #     threshold = self.s_wl[int(self.args.cpu_gpu_ratio*self.s_wl.shape[0])]
+        #     threshold = self.s_wl[int(self.cpu_gpu_ratio*self.s_wl.shape[0])]
         #     skip_threshold = 405000
         # elif self.args.dataset == 'ogbn-papers100M':
         #     threshold = 0.001
@@ -135,12 +93,12 @@ class UnevenDDPIndices(torch.utils.data.IterableDataset):
             indices = _divide_by_worker(indices, self.batch_size, self.drop_last)
         else:
             skip_workload = self.args.cpu_process
-            idx = int(self.args.cpu_gpu_ratio * self.s_wl.shape[0])
+            idx = int(self.cpu_gpu_ratio * self.s_wl.shape[0])
             dynamic_threshold = (self.s_wl[
-                                     idx] / idx) * self.total_batch_size * self.args.cpu_gpu_ratio
-            idx2 = int((self.args.cpu_gpu_ratio + self.args.skip_delta) * self.s_wl.shape[0])
+                                     idx] / idx) * self.total_batch_size * self.cpu_gpu_ratio
+            idx2 = int((self.cpu_gpu_ratio + self.args.skip_delta) * self.s_wl.shape[0])
             skip_threshold = (self.s_wl[
-                                  idx2] / idx2) * self.total_batch_size * self.args.cpu_gpu_ratio
+                                  idx2] / idx2) * self.total_batch_size * self.cpu_gpu_ratio
 
             indices, batch_sizes = [], []
             worker_info = torch.utils.data.get_worker_info()
@@ -275,15 +233,3 @@ class DynamicTensorizedDatasetIter(object):
             for i in range(len(type_id_uniq))
         }
         return id_dict
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset',
-                        type=str,
-                        default='ogbn-products')
-    parser.add_argument('--data_path',
-                        type=str,
-                        default='/data/gangda')
-    args = parser.parse_args()
-    get_data(args.dataset, args.data_path)

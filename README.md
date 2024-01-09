@@ -1,6 +1,6 @@
-## Setup
+# Setup
 
-1. Setup a Python environment and Install Deep Graph Library (DGL)
+1. Setup a Python environment (>=3.11). Install PyTorch (>=2.0.1) and Deep Graph Library (>=1.1).
 2. Install TCMalloc:  https://google.github.io/tcmalloc/quickstart.html  
 Note: need to install Bazel first (also mentioned in the link above).   
 Note 2: Alternative approach to install TCMalloc: https://github.com/AUTOMATIC1111/stable-diffusion-webui/issues/10117
@@ -8,44 +8,38 @@ Note 2: Alternative approach to install TCMalloc: https://github.com/AUTOMATIC11
 ``` LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4.5.3 python main.py```
 
 
-## Hybrid GNN Training
-### Usage
-  ```
-  python main.py --cpu_process 4 --gpu_process 1 --cpu_gpu_ratio 0.3 --dataset ogbn-products --sampler shadow --model sage --layer 5
-  ```
+# Hybrid GNN Training
+## Usage
+### 1. Download dataset:  
+```
+python dataset.py --dataset ogbn-products --data_path your_data_path
+```
+### 2. (Optional) Load feature matrix into shared memory:  
+MAG240M datasets have large feature matrices (56G and 380G). To reduce the memory consumption and feature loading time, we first load the required data into the shared memory, then conduct one or more trials at the same time.  
+```
+python load_mag_to_shm.py --data_path your_data_path
+```   
+Note that `load_mag_to_shm.py` requires a large amount of available memory (roughly 800G) when copying data from disk to shared memory, and consumes a smaller amount of memory (roughly 400G) after movement completes. Be sure to spare enough memory during the data movement.
+### 3. Preprocess training node workload:   
+``` 
+python workload.py --sampler neighbor --dataset ogbn-products --data_path your_data_path 
+```
+### 4. Training GNNs on CPUs and GPUs:  
+```
+python main.py --dataset ogbn-products --data_path your_data_path
+               --cpu_process 2 --gpu_process 1
+               --batch_type dynamic --cached_ratio 0.2
+               --sampler neighbor --model sage
+```  
   Important Arguments: 
+  - `--dataset`: the training datasets. Available choices [reddit, ogbn-products, mag240M]
   - `--cpu_process`: Number of CPU computing processes used in training. Available choices [0, 1, 2, 4]
   - `--gpu_process`: Number of GPU computing processes (devices) used in training. Available choices [0, 1]
-  - `--cpu_gpu_ratio`: Workload ratio between CPU and GPU, computed by
-    `(# of batch nodes assigned to all CPU processes) / (# of batch nodes assigned to all GPU processes)`
-  - `--dataset`: the training datasets. Available choices [ogbn-products, ogbn-papers100M, mag240M]
+  - `--batch_type`: Strategy of workload assignment. Available choices ['none', 'static', 'dynamic', 'dynamic_hard']
+  - `--cached_ratio`: Ratios of node features cached in GPU.
   - `--sampler`: the mini-batch sampling algorithm. Available choices [shadow, neighbor]
   - `--model`: GNN model. Available choices [gcn, sage]
-  - `--layer`: number of GNN layers.
   
   Hint: arguments `--cpu_process` and `--gpu_process` can be set to 0 for baseline comparison.  
   Note: while we only test our library using three datasets, two samplers, and two types of GNN model, other setups should also work as our library is compatible with DGL. Please refer to the [DGL document](https://docs.dgl.ai) for a full list of available sampler, GNN models, etc.  
-  Note 2: large memory space (512 GB or above) is highly recommended. 
-
-### Code Explanation
-
-To ensure load balancing, we need to be able to assign different batch sizes to the CPUs and the GPUs.  
-We replace the [DDPTensorizedDataset](https://github.com/dmlc/dgl/blob/7b1639f1aacb006fa65ef8cef09c49f5219bd5c1/python/dgl/dataloading/dataloader.py#L252)
-class in DGL with a new class [UnevenDDPTensorizedDataset](https://github.com/jasonlin316/HiPC23/blob/main/main.py#L95). 
-This class splits the indices based on the `sub_batch_sizes` array while including all other features in the previous class.
-For batch size assignment, the logic is written in function 
-[get_subbatch_size()](https://github.com/jasonlin316/HiPC23/blob/main/main.py#L230).
-
-The two-level resource manager is implemented in ```manager.py```.
-
-
-## Specific Instruction for Training on MAG240M
-### Load Feature Matrix to Shared Memory
-MAG240M dataset has a large feature matrix (380G). To reduce the memory consumption and feature loading time,
-we first load the required data into the shared memory, then conduct one or more trials at the same time.
-  ```
-  python load_mag_to_shm.py
-  ```
-Note that `load_mag_to_shm.py` requires a large amount of available memory (roughly 800G) when copying data
-from disk to shared memory, and consumes a smaller amount of memory (roughly 400G) after movement completes.
-Be sure to spare enough memory during the data movement.
+  Note 2: large memory space (512 GB or above) is highly recommended.

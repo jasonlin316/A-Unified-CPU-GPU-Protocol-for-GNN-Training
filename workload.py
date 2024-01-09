@@ -1,17 +1,16 @@
 import argparse
-import random
+import os
 
-import dgl
 import torch
-from dgl import transforms, NID
-from dgl.data import AsNodePredDataset
 from dgl.dataloading import NeighborSampler, DataLoader, ShaDowKHopSampler, Sampler
-from dgl.sampling.utils import EidExcluder
-from ogb.nodeproppred import DglNodePropPredDataset
 from tqdm import tqdm
 import dgl.sparse as dglsp
 
-from data import get_data
+from dataset import get_data
+
+PROCESS_DIR = "processed/"
+if not os.path.exists(PROCESS_DIR):
+    os.makedirs(PROCESS_DIR)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--sampler',
@@ -21,21 +20,24 @@ parser.add_argument('--sampler',
 parser.add_argument('--batch_size',
                     type=int,
                     default=1024,)
+parser.add_argument('--runs',
+                    type=int,
+                    default=10,)
 parser.add_argument('--device',
                     type=int,
                     default=0,)
 parser.add_argument('--data_path',
-                        type=str,
-                        default='/data/gangda')
+                    type=str,
+                    default='/data/gangda')
 parser.add_argument('--dataset',
                     type=str,
                     default='ogbn-products')
-parser.add_argument('--matrix', action='store_true')
+parser.add_argument('--edge',
+                    action='store_true',
+                    help='estimate workload by the number of edges')
 args = parser.parse_args()
 
 fanouts = [15, 10, 5]
-# fanouts = [30, 20, 10]
-# fanouts = [5, 10, 15]
 
 num_classes, train_idx, g = get_data(args.dataset, args.data_path)
 
@@ -65,10 +67,18 @@ loader = DataLoader(
     shuffle=False,
 )
 
-runs = 10
 avg_traversed = []
-if args.matrix:
-    for run in range(runs):
+if args.edge:
+    for run in range(args.runs):
+        num_traversed_edges = []
+        for nid, (input_nodes, output_nodes, blocks) in tqdm(enumerate(loader)):
+            num_edges = 0
+            for block in blocks:
+                num_edges += block.num_edges()
+            num_traversed_edges.append(num_edges)
+        avg_traversed.append(torch.tensor(num_traversed_edges))
+else:
+    for run in range(args.runs):
         num_traversed_edges = []
         for nid, (input_nodes, output_nodes, blocks) in tqdm(enumerate(loader)):
             X = torch.ones(input_nodes.shape, dtype=torch.float).to(args.device)
@@ -85,17 +95,8 @@ if args.matrix:
                 X = X[:output_nodes.shape[0]]
             num_traversed_edges.append(X)
         avg_traversed.append(torch.cat(num_traversed_edges))
-else:
-    for run in range(runs):
-        num_traversed_edges = []
-        for nid, (input_nodes, output_nodes, blocks) in tqdm(enumerate(loader)):
-            num_edges = 0
-            for block in blocks:
-                num_edges += block.num_edges()
-            num_traversed_edges.append(num_edges)
-        avg_traversed.append(torch.tensor(num_traversed_edges))
 
 avg_traversed = torch.stack(avg_traversed).float().mean(dim=0)
 file_name = '{}_{}_{}_{}'.format(args.dataset, args.sampler, str(fanouts), args.batch_size) + \
-            ('_matrix' if args.matrix else '')
-torch.save(avg_traversed.cpu(), "processed/{}.pt".format(file_name))
+            ('_edges' if args.edge else '_matrix')
+torch.save(avg_traversed.cpu(), PROCESS_DIR+"{}.pt".format(file_name))

@@ -1,3 +1,4 @@
+import argparse
 import threading
 import time
 
@@ -39,7 +40,7 @@ def fetch_papers_from_shm():
 def host_datas(e):
     tik = time.time()
     print('Start Loading features')
-    dataset = AsNodePredDataset(DglNodePropPredDataset('ogbn-papers100M', '/data/gangda'))
+    dataset = AsNodePredDataset(DglNodePropPredDataset('ogbn-papers100M', args.data_path))
     g = dataset[0]
     print('Loading feature finished')
     print('Start moving features to shm')
@@ -60,8 +61,15 @@ def host_datas(e):
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_path',
+                        type=str,
+                        default='/data/gangda')
+    args = parser.parse_args()
     event = threading.Event()
-    threading.Thread(target=host_datas, args=[event], daemon=True).start()
+    threading.Thread(target=host_datas,
+                     args=[event],
+                     daemon=True).start()
     try:
         event.wait()
     except KeyboardInterrupt:
